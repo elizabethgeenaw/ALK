@@ -1,7 +1,5 @@
-# ---- V4 outputs ----
-# Main Fig 1C: /project/gilad/geena/ALK_draft/V4/Figures/1C_celltype_proportion_by_treatment.pdf (writes celltype_proportion_by_treatment.pdf)
+# Main Fig 1C: /project/gilad/geena/ALK_draft/V4/Figures/1C_celltype_proportion_by_treatment.pdf 
 # Supp Fig S1: /project/gilad/geena/ALK_draft/V4/Supplementary Figures/S1_celltype_proportion_by_individual.pdf
-# --------------------
 
 library(BPCells)
 library(Seurat)
