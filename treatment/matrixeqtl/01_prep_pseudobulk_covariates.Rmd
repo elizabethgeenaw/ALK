@@ -1,0 +1,981 @@
+---
+title: "Prepare MatrixEQTL inputs: pseudobulk expression and covariates"
+output: html_document
+date: "2026-01-06"
+---
+
+This script prepares the (1) expression, (2) covariate, and (3) genotype input files for MatrixEQTL for both the treatment and control datasets. MatrixEQTL requires that the columns (samples) are in the same order across all three files.
+
+```{r}
+library(Seurat)
+library(BPCells)
+library(SingleCellExperiment)
+library(scater)
+library(dplyr)
+library(Matrix)
+library(dreamlet)
+library(qs)
+library(readr)
+library(purrr)
+library(tidyr)
+library(edgeR)
+library(PCAForQTL)
+library(CelliD)
+```
+
+# 0) Convert RDS to SCE
+## Treatment
+First, I convert my objects into SingleCellExperiment objects. The reason I split them up is because the objects are too big to combine (Error in cbind.Matrix(x, y, deparse.level = 0L) : p[length(p)] cannot exceed 2^31-1)
+```{r}
+# Read post-QC treatment object: 1,962,313 cells x 36,601 genes
+treatment_rds <- readRDS("/project/gilad/geena/publication_clean/results/celltype_annotation/postQC_lognorm_batch1_2_3_4_all_germlayeradded.rds")
+
+# 19193 is missing in genotype data so take it out -> 1,955,937 cells
+treatment_rds <- treatment_rds[, !treatment_rds$individual %in% c("NA19193")]
+
+# Function to make SingleCellExperiment objects
+make_sce_object <- function(treatment_rds, treat) {
+  print(paste0("Treatment: ", treat))
+  
+  # Subset treatment object
+  cond_obj <- treatment_rds[, treatment_rds$treatment == treat]
+  
+  # Convert to sparse matrix
+  print("Converting RNA counts to dgCMatrix...")
+  cond_obj[["RNA"]]$counts <- as(cond_obj[["RNA"]]$counts, "dgCMatrix")
+  
+  # Convert to SingleCellExperiment object
+  print("Creating SingleCellExperiment object...")
+  obj_sce <- as.SingleCellExperiment(cond_obj)
+  print(paste0("There are ", dim(obj_sce)[2], " cells and ", dim(obj_sce)[1], " genes"))
+  print("-------")
+  
+  return(obj_sce)
+}
+
+
+# Make single cell objects for every treatment
+Ale_obj_sce <- make_sce_object(treatment_rds, "Ale") #397,689 cells, 36,601 genes
+Bri_obj_sce <- make_sce_object(treatment_rds, "Bri") #399,690 cells, 36,601 genes
+Cer_obj_sce <- make_sce_object(treatment_rds, "Cer") #380,716 cells, 36,601 genes
+Cri_obj_sce <- make_sce_object(treatment_rds, "Cri") #396,676 cells, 36,601 genes
+Lor_obj_sce <- make_sce_object(treatment_rds, "Lor") #379,272 cells, 36,601 genes
+
+saveRDS(Ale_obj_sce, "/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/SCE_objects/Ale_obj_sce")
+saveRDS(Bri_obj_sce, "/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/SCE_objects/Bri_obj_sce")
+saveRDS(Cer_obj_sce, "/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/SCE_objects/Cer_obj_sce")
+saveRDS(Cri_obj_sce, "/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/SCE_objects/Cri_obj_sce")
+saveRDS(Lor_obj_sce, "/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/SCE_objects/Lor_obj_sce")
+
+```
+
+## Control
+Before pseudobulking for control I need to split into subsets because of the size
+
+```{r}
+# SPLIT CONTROL DATA UP TO CONVERT TO SCE
+control_rds <- readRDS("/project/gilad/geena/publication_clean/results/control/celltype_annotation/combined_control_filtnorm_cellid.rds")
+
+# 19193 is missing in genotype data so take it out -> 901,966 cells
+# The ebQTL paper removed outlier samples from PC biplots (so they removed NA18907) -> 892,798 cells
+control_rds <- control_rds[, !control_rds$donor_id %in% c("NA19193", "NA18907")]
+
+# Have metadata columns match the metadata columns in the treatment
+control_rds$individual <- control_rds$donor_id
+control_rds$treatment <- "Control"
+
+# Get metadata (will need for covariate files)
+meta_control <- control_rds@meta.data
+saveRDS(meta_control, "/project/gilad/geena/publication_clean/results/control/celltype_annotation/combined_control_filtnorm_cellid_metadata_rm18907")
+#meta_control <- readRDS("/project/gilad/geena/publication_clean/results/control/celltype_annotation/combined_control_filtnorm_cellid_metadata_rm18907")
+
+# Metadata for each sample (where sample is treatment_individual, i.e. "Control_NA18522")
+meta_sample_control <- meta_control %>% 
+  dplyr::select(c(Collection.Date, donor_id, sex)) %>% 
+  mutate(sample = paste("Control", donor_id, sep = "_")) %>% 
+  distinct(.keep_all = T)
+
+
+make_sce_object <- function(cond_obj) {
+  # Convert to sparse matrix
+  print("Converting RNA counts to dgCMatrix...")
+  cond_obj[["RNA"]]$counts <- as(cond_obj[["RNA"]]$counts, "dgCMatrix")
+  
+  # Convert to SingleCellExperiment object
+  print("Creating SingleCellExperiment object...")
+  obj_sce <- as.SingleCellExperiment(cond_obj)
+  print(paste0("There are ", dim(obj_sce)[2], " cells and ", dim(obj_sce)[1], " genes"))
+  print("-------")
+  
+  return(obj_sce)
+}
+
+# Split into smaller subsets (keep data from a single donor together so when I pseudobulk I can do separately per subset)
+split_control_rds <- function(control_rds, num_splits) {
+  unique_donors <- unique(control_rds$donor_id)
+  split_groups <- split(unique_donors, cut(seq_along(unique_donors), breaks = num_splits, labels = FALSE))
+  
+  subsets <- lapply(split_groups, function(donor_group) {
+    control_rds[, control_rds$donor_id %in% donor_group]
+  })
+  
+  return(subsets)
+}
+
+# Function to split and convert Seurat subsets into SingleCellExperiment objects
+process_and_assign_sce_subsets <- function(control_rds, num_splits = 4) {
+  print(paste0("Splitting control_rds into ", num_splits, " subsets..."))
+  
+  # Step 1: Split control_rds
+  subsets <- split_control_rds(control_rds, num_splits = num_splits)
+  
+  # Step 2: Convert each subset into SingleCellExperiment and assign as an object in R environment
+  for (i in seq_along(subsets)) {
+    subset_name <- paste0("sce_", i)
+    print(paste0("Processing ", subset_name, " with ", ncol(subsets[[i]]), " cells..."))
+    
+    assign(subset_name, make_sce_object(subsets[[i]]), envir = .GlobalEnv)
+  }
+  
+  print("All subsets processed and assigned as individual SingleCellExperiment objects.")
+}
+
+# Run the function, now I'll have 10 objects (sce_1, sce_2, ..., sce_10)
+# I didn't save just because it takes a long time and lot of memory
+process_and_assign_sce_subsets(control_rds, num_splits = 10)
+
+# Now add perturbation scores to all my metadata files
+sce_list_control <- list(
+  subset1 = sce_1,
+  subset2 = sce_2,
+  subset3 = sce_3,
+  subset4 = sce_4, 
+  subset5 = sce_5, 
+  subset6 = sce_6, 
+  subset7 = sce_7, 
+  subset8 = sce_8, 
+  subset9 = sce_9, 
+  subset10 = sce_10
+)
+```
+
+Below I'll give some code for preparing my (1) expression, (2) covariate, and (3) genotype files that will be used as input for MatrixEQTL.MatrixEQTL requires that the columns for each of these files are in the same order.
+
+# 1) Expression data
+## Define functions
+Below I define a function to help with pseudobulking.
+- *process_treatment_data_with_summary*: main function for filtering and pseudobulk (treatment-cell type-donor) processing. This processes data for an individual treatment and filters samples according to a user-input cell count (cell_cutoff) and filters out cell types found in fewer than a user-input number of individuals (celltype_indiv_filter). This will be run for one treatment at a time. Remove donor-cell type-treatment groups with <15 cells. Only keep cell types that had at least 20 individuals after the above filtering. 
+
+
+```{r}
+# General function for filtering and pseudobulk (treatment-cell type-donor) processing
+# This processes data for an individual treatment and filters samples according to a user-input cell count (cell_cutoff) and filters out cell types found in fewer than a user-input number of individuals (celltype_indiv_filter) and keeps track of cell counts before and after filtering
+# This will be run for one treatment at a time
+# Remove donor-cell type-treatment groups with <15 cells
+# Only keep cell types that had at least 20 individuals after the above filtering
+process_treatment_data_with_summary <- function(
+  obj_sce, # SCE object
+  treat, # name of the subset (i.e. for pseudobulk_<subset>.rds file); could be treatment or other subset (for control)
+  cell_cutoff = 15, # minimum required pseudobulk count to keep a sample
+  celltype_indiv_filter = 20, # minimum number of individuals a cell type must be found in after filtering to keep
+  matrixeqtl_folder
+) {
+
+  message("-----------------")
+  message("Processing treatment: ", treat,
+          " | cell cutoff ", cell_cutoff,
+          " | celltype individual cutoff ", celltype_indiv_filter)
+  message("-----------------")
+
+
+  # Record cell counts BEFORE any filtering
+  cell_count <- as.data.frame(table(
+    obj_sce$cellid_type,
+    obj_sce$individual,
+    obj_sce$treatment
+  ))
+  colnames(cell_count) <- c(
+    "cellid_type", "individual", "treatment", "num_cells_unfiltered"
+  )
+
+  # Annotate samples to drop
+  ## Donor without genotype (NA19193) - should already be removed but have label just in case
+  obj_sce$drop_no_genotype <- obj_sce$individual == "NA19193"
+
+
+  # Flag as "to drop" for donor x celltype x treatment sample if meets any of the above drop criteria
+  drop_flags_tbl <- as.data.frame(colData(obj_sce)) %>%
+    group_by(cellid_type, individual, treatment) %>%
+    summarise(
+      drop_no_genotype    = any(drop_no_genotype),
+      .groups = "drop"
+    )
+
+  n_cells_raw <- ncol(obj_sce)
+  
+  # Now actually apply filtering for no genotype
+  keep_cells <- !(obj_sce$drop_no_genotype)
+  obj_sce <- obj_sce[, keep_cells]
+
+  # Some further QC - only commenting out because of new R v4.4.1 package incompatibility
+  qc <- perCellQCMetrics(obj_sce)
+  
+  ## Remove cells with few or many detected genes
+  ol <- scater::isOutlier(qc$detected, nmads = 5, log = TRUE)
+  obj_sce <- obj_sce[, !ol]
+
+  # Remove cells that aren't assigned to a cell type
+  obj_sce <- obj_sce[, obj_sce$cellid_type != "unassigned"]
+
+  # Make sample id (celltype x individual x treatment)
+  obj_sce$sample_id <- paste(
+    obj_sce$cellid_type,
+    obj_sce$individual,
+    obj_sce$treatment,
+    sep = "_"
+  )
+
+  # Filter based on pseudobulk sample cell count; remove donor-celltype-treatment samples with too few cells (i.e. 15 cells)
+  filtered_cell_count <- cell_count[cell_count$num_cells_unfiltered >= cell_cutoff, ]
+  valid_samples <- paste(
+    filtered_cell_count$cellid_type,
+    filtered_cell_count$individual,
+    filtered_cell_count$treatment,
+    sep = "_"
+  )
+
+  obj_sce_filtered <- obj_sce[, obj_sce$sample_id %in% valid_samples]
+
+  # Record cell counts per cell type, individual, and treatment AFTER filtering by cell count
+  filtered_cell_count_final <- as.data.frame(table(
+    obj_sce_filtered$cellid_type,
+    obj_sce_filtered$individual,
+    obj_sce_filtered$treatment
+  ))
+  colnames(filtered_cell_count_final) <- c(
+    "cellid_type", "individual", "treatment", "num_cells_filtered"
+  )
+
+  # After cell count filtering, filter out cell types found in fewer than the given number of individuals (within each treatment), i.e. 20 individuals
+  unique_individuals_per_celltype <- filtered_cell_count_final %>%
+    filter(num_cells_filtered > 0) %>%
+    group_by(cellid_type, treatment) %>%
+    summarise(
+      num_individuals = n_distinct(individual),
+      .groups = "drop"
+    )
+
+  # Note that during arbitrary subsetting of Control this will be inaccurate until combining everything again so just set celltype_indiv_filter to 1 for Control
+  valid_cell_types <- unique_individuals_per_celltype$cellid_type[unique_individuals_per_celltype$num_individuals >= celltype_indiv_filter]
+
+  obj_sce_filtered2 <- obj_sce_filtered[
+    , obj_sce_filtered$cellid_type %in% valid_cell_types
+  ]
+
+  # Record final cell counts per donor-cell type-treatment AFTER both filters
+  final_cell_count <- as.data.frame(table(
+    obj_sce_filtered2$cellid_type,
+    obj_sce_filtered2$individual,
+    obj_sce_filtered2$treatment
+  ))
+  colnames(final_cell_count) <- c(
+    "cellid_type", "individual", "treatment", "num_cells_final"
+  )
+
+  # Merge counts before and after filtering for summary table
+  summary_table <- cell_count %>%
+    left_join(filtered_cell_count_final,
+              by = c("cellid_type", "individual", "treatment")) %>%
+    left_join(final_cell_count,
+              by = c("cellid_type", "individual", "treatment")) %>%
+    left_join(drop_flags_tbl,
+              by = c("cellid_type", "individual", "treatment")) %>%
+    replace_na(list(
+      num_cells_filtered = 0,
+      num_cells_final = 0,
+      drop_no_genotype = FALSE
+    ))
+
+  # Assign reasons why cells were dropped
+  summary_table$dropped <- summary_table$num_cells_final == 0
+  summary_table$reason_dropped <- "n/a"
+
+  summary_table$reason_dropped[summary_table$drop_no_genotype] <-
+    "no genotype for donor"
+
+  summary_table$reason_dropped[
+    summary_table$num_cells_unfiltered < cell_cutoff
+  ] <- "low cell count"
+
+  summary_table$reason_dropped[
+    summary_table$num_cells_filtered > 0 &
+    summary_table$num_cells_final == 0 &
+    summary_table$reason_dropped == "n/a"
+  ] <- "not found in enough individuals after cell count filtering"
+  
+  print(paste("Unique cell types before filtering:", length(unique(obj_sce$cellid_type))))
+  print(paste("Unique cell types after filtering by cell count:", length(unique(obj_sce_filtered$cellid_type))))
+  print(paste("Unique cell types after filtering by cell count + num indiv:", length(unique(obj_sce_filtered2$cellid_type))))
+  print(paste("Total cells before filtering:", n_cells_raw))
+  print(paste("Total cells after filtering by cell count:", ncol(obj_sce_filtered)))
+  print(paste("Total cells after filtering by cell count + cell type by num indiv:", ncol(obj_sce_filtered2)))
+  
+
+  # Gene-level filtering; only keep genes detected in >10 cells
+  obj_sce_filtered2 <- obj_sce_filtered2[
+    rowSums(counts(obj_sce_filtered2) > 0) > 10,
+  ]
+
+  # Post-QC pseudobulk aggregation
+  print(paste0("Aggregating ", treat, " object to pseudobulk..."))
+  pb <- aggregateToPseudoBulk(
+    obj_sce_filtered2,
+    assay = "counts",
+    cluster_id = "cellid_type",
+    sample_id = "individual",
+    verbose = FALSE
+  )
+
+  pseudo_bulk_list <- lapply(pb@assays@data, as.matrix)
+  
+  pseudo_bulk_list <- lapply(pseudo_bulk_list, function(x) {
+    if (is.null(x)) return(NULL)
+    x <- as.matrix(x)
+    
+    # Remove donors with zero cells
+    keep_cols <- colSums(x) > 0
+    if (sum(keep_cols) == 0) return(NULL)
+    x <- x[, keep_cols, drop = FALSE]
+    
+    # Remove genes that are all 0
+    x <- x[rowSums(x) > 0, , drop = FALSE]
+    
+    return(x)
+  })
+  
+  pseudo_bulk_list <- pseudo_bulk_list[!sapply(pseudo_bulk_list, is.null)]
+  
+  # Save pseudobulk data
+  save_dir <- paste0(matrixeqtl_folder, 
+                     "pseudobulk_", cell_cutoff, "cells_", celltype_indiv_filter, "indiv_summary/")
+  if (!dir.exists(save_dir)) {
+    dir.create(save_dir, recursive = TRUE)
+  }
+  
+  save_path <- paste0(save_dir, "pseudo_bulk_", treat, ".rds")
+  saveRDS(pseudo_bulk_list, save_path)
+  message("Post-QC pseudobulk saved for ", treat, " at ", save_path)
+  
+  # Save filtering summary table
+  summary_path <- paste0(save_dir, 
+                         "cellcount_filter_summary_", 
+                         treat, ".tsv")
+  write.table(summary_table, file = summary_path, sep = "\t", quote = FALSE, row.names = FALSE)
+  message("Filtering summary table saved at: ", summary_path)
+
+  return(invisible(list(
+    pseudobulk = paste0(save_dir, "pseudo_bulk_", treat, ".rds"),
+    summary    = paste0(save_dir, "cellcount_filter_summary_", treat, ".tsv")
+  )))
+}
+```
+
+In addition to pseudobulk filtering, we also want to filter the genes. Genes with no variance across samples would be uninformative for eQTL analysis and are excluded. 
+
+One thing to note about our gene filtering: the way mash works is it only keeps the genes that are found in ALL conditions. This will be limited by the condition with the fewest number of genes. One problem we ran into when running more stringent filtering is that then there were only ~2,000 genes across all conditions (i.e. the smallest condition only had ~2,000 so even the larger conditions were limited to that many). An alternative used by Lin et al. was to be more lenient with filtering in eQTL mapping so that more genes would be tested in mash (the number of genes in mash is limited by the minimum number of genes across all conditions - i.e. if Hepatoblasts x Alectinib only has 2,000 genes that pass a filter, then only those 2,000 genes are tested in all the other cell types and treatments as well). Because of this, we are using a more lenient gene filter than some other eQTL studies normally would.
+
+We also convert to logCPM and perform TMM normalization. We also perform inverse normal transformation across samples for each gene (the heavy-tailed distribution of gene expression violates the assumption of Gaussian distributed errors in linear regression for eQTL detection, which results in increased Type I or Type II errors. Applying rank-based inverse normal transformation (INT) can make the expression values more normally distributed).
+
+- *filter_genes_post_aggregation_lenient*: This function creates TMM-normalized, inverse-normal-transformed expression files per cell type and filters genes using filterByExpr, removes genes with zero variance, and only keeps protein-coding genes.
+
+Define the function below:
+```{r}
+# Gene filtering after pseudobulk aggregation
+filter_genes_post_aggregation_lenient <- function(treatments, 
+                                          pseudobulk_list,
+                                          output_prefix, 
+                                          protein_coding_genes, 
+                                          cellid_types,
+                                          group_by_treatment = TRUE,
+                                          UMI_cutoff = 1) {
+  # Initialize a data frame to store the summary of gene counts before and after filtering for each cell type
+  gene_count_summary <- data.frame(
+    cellid_type = character(),
+    before_filtering = integer(),
+    after_median_filtering = integer(),
+    after_variance_filtering = integer(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Create TMM-normalized, inverse-normal-transformed expression files per cell type
+  for (cellid_type in cellid_types) {
+    print(paste("Processing cell type:", cellid_type))
+    
+    # Combine data across treatments for the current cell type
+    ct_matrices <- lapply(treatments, function(t) {
+      mat <- pseudobulk_list[[t]][[cellid_type]]
+  
+      # Drop if missing
+      if (is.null(mat)) return(NULL)
+    
+      # Double check that it's a matrix
+      mat <- as.matrix(mat)
+  
+      # Drop if not a matrix
+      if (ncol(mat) < 1 || nrow(mat) < 1) return(NULL)
+  
+      colnames(mat) <- paste0(colnames(mat), "_", t)
+     mat
+    })
+  
+    # Remove NULL entries (subsets without this cell type)
+    ct_matrices <- ct_matrices[!sapply(ct_matrices, is.null)]
+
+    # Find shared genes (intersection across treatments in that cell type)
+    shared_genes <- Reduce(intersect, lapply(ct_matrices, rownames))
+  
+    # Combine into one matrix (genes × all donors across treatments)
+    combined_mat <- Reduce(
+      function(x, y) cbind(x[shared_genes, , drop = FALSE],
+                           y[shared_genes, , drop = FALSE]),
+      ct_matrices
+    )
+    
+    message(
+      cellid_type, ": ", 
+      nrow(combined_mat), " genes; ", 
+      ncol(combined_mat), " samples"
+    )
+    
+    # Drop columns with no gene expression
+    combined_mat <- combined_mat[, colSums(combined_mat) > 0, drop = FALSE]
+    if (ncol(combined_mat) == 0) {
+      warning("All columns have zero sums for ", cellid_type, ". Skipping...")
+      next
+    }
+    
+    # TMM normalization
+    # For each cell type, all samples are TMM normalized and split by condition
+    # Save TMM-normalized logCPM matrix
+    if (group_by_treatment) {
+      condition <- factor(as.character(lapply(strsplit(colnames(combined_mat), '_'), `[[`, 2)))
+      dge <- DGEList(counts = combined_mat, group = condition)
+    } else {
+      dge <- DGEList(counts = combined_mat)  # all donors treated as one group
+    }
+
+  
+    initial_gene_count <- nrow(dge$counts)
+    print(paste0("Initial number of genes: ", initial_gene_count))
+    
+    # Restrict to protein-coding genes
+    dge <- dge[rownames(dge) %in% protein_coding_genes, ]
+    print(paste0("Protein-coding genes: ", nrow(dge$counts)))
+    
+    # Record gene count before filtering
+    before_filtering <- nrow(dge$counts)
+    
+    # Keep genes with median UMI >= 1 across samples
+    keep_median <- apply(dge$counts, 1, median) >= UMI_cutoff
+    dge <- dge[keep_median, ]
+    after_median_filtering <- nrow(dge$counts)
+    print(paste0("Genes after median UMI filter: ", after_median_filtering))
+    
+    # Remove zero variance genes
+    keep_var <- matrixStats::rowVars(dge$counts, useNames = FALSE) > 0
+    if (sum(keep_var) == 0) return(NULL)
+    dge$counts <- dge$counts[keep_var, ]
+    
+    after_variance_filtering <- nrow(dge$counts)
+    print(paste0("Genes after zero-variance filter: ", after_variance_filtering))
+    
+    # Add the summary for this celltype to the dataframe
+    gene_count_summary <- rbind(gene_count_summary, data.frame(
+      cellid_type = cellid_type,
+      before_filtering = before_filtering,
+      after_median_filtering = after_median_filtering,
+      after_variance_filtering = after_variance_filtering
+    ))
+    
+    # TMM normalization and convert to CPM
+    dge <- calcNormFactors(dge, method="TMM")
+    logCPM <- cpm(dge, normalized.lib.sizes = TRUE, log = T)
+    id <- rownames(logCPM)
+    logCPM <- cbind(id, logCPM)
+    
+    # Define output directory to save logCPM
+    output_dir <- paste0(output_prefix, "normalized_celltypes_medianUMI", as.character(UMI_cutoff), "/logcpm/")
+    if (!dir.exists(output_dir)) {
+        dir.create(output_dir, recursive = TRUE)
+    }
+    write.table(logCPM, file = paste0(output_dir, cellid_type, "_all_postqc_tmm_logcpm.txt"), row.names = FALSE, sep = "\t", quote = FALSE)
+    print("TMM-logCPM data saved.")
+    
+    # Also add inverse normal transformation on each gene across donor
+    count_mtx <- as.data.frame(logCPM, stringsAsFactors = FALSE, check.names = FALSE)
+
+    id <- count_mtx$id
+    count_mtx <- count_mtx[-1] # Remove extra gene name column
+  
+    zvalues <- qnorm(ppoints(ncol(count_mtx)))
+    z <- count_mtx
+  
+    for (i in 1:nrow(z)) {
+      x <- as.numeric(z[i, ])
+      z[i,] <- zvalues[order(order(x))]
+    }
+    z <- cbind(id, z)
+  
+    output_dir <- paste0(output_prefix, "normalized_celltypes_medianUMI", as.character(UMI_cutoff), "/logcpm_int/")
+    if (!dir.exists(output_dir)) {
+      dir.create(output_dir, recursive = TRUE)
+    }
+    write.table(z, file = paste0(output_dir, cellid_type, "_all_postqc_tmm_logcpm_int.txt"), row.names = FALSE, sep = "\t", quote = FALSE)
+    print("TMM-logCPM-INT data saved.")
+  }
+  
+  # Write gene count summary to file
+  write.table(gene_count_summary, file = paste0(output_dir, "gene_count_summary_post_aggregation.tsv"), sep = "\t", row.names = FALSE, col.names = TRUE)
+  print("Gene count summary saved.")
+}
+
+```
+
+## 1A) Treatment: Pseudobulk
+After defining the functions above, now I use them to actually run pseudobulking + filtering based on cell count:
+
+```{r}
+# I've converted my objects into SingleCellExperiment objects. The reason I split them up by treatment is because the objects are too big to combine (Error in cbind.Matrix(x, y, deparse.level = 0L) : p[length(p)] cannot exceed 2^31-1)
+Ale_obj_sce <- readRDS("/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/SCE_objects/Ale_obj_sce")
+Bri_obj_sce <- readRDS("/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/SCE_objects/Bri_obj_sce")
+Cer_obj_sce <- readRDS("/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/SCE_objects/Cer_obj_sce")
+Cri_obj_sce <- readRDS("/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/SCE_objects/Cri_obj_sce")
+Lor_obj_sce <- readRDS("/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/SCE_objects/Lor_obj_sce")
+
+sce_list <- list(
+  Ale = Ale_obj_sce,
+  Bri = Bri_obj_sce,
+  Cer = Cer_obj_sce,
+  Cri = Cri_obj_sce,
+  Lor = Lor_obj_sce
+)
+```
+
+Donor cutoff of 20
+```{r}
+matrixeqtl_input_folder = "/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/"
+count_thresh = 15
+ct_thresh = 20
+
+for (t in names(sce_list)) {
+  process_treatment_data_with_summary(
+    obj_sce = sce_list[[t]], 
+    treat = t,
+    cell_cutoff = count_thresh,
+    celltype_indiv_filter = ct_thresh,
+    matrixeqtl_folder = matrixeqtl_input_folder
+  )
+}
+
+# Define paths to summary tables
+pseudobulk_folder_name <- paste0(matrixeqtl_input_folder, "/pseudobulk_", count_thresh, "cells_", ct_thresh, "indiv_summary/")
+
+summary_paths <- list(
+  "Ale" = paste0(pseudobulk_folder_name, "cellcount_filter_summary_Ale.tsv"),
+  "Bri" = paste0(pseudobulk_folder_name, "cellcount_filter_summary_Bri.tsv"),
+  "Cer" = paste0(pseudobulk_folder_name, "cellcount_filter_summary_Cer.tsv"),
+  "Cri" = paste0(pseudobulk_folder_name, "cellcount_filter_summary_Cri.tsv"),
+  "Lor" = paste0(pseudobulk_folder_name, "cellcount_filter_summary_Lor.tsv")
+)
+
+# Load all tables and combine them
+summary_list <- lapply(summary_paths, read_tsv)
+combined_summary <- bind_rows(summary_list, .id = "treatment")
+write_tsv(combined_summary, paste0(pseudobulk_folder_name, "cellcount_filter_summary_combined.tsv"))
+
+# Keep only donor-celltype-treatment pairs that passed filtering
+filtered_summary <- combined_summary %>%
+  filter(!dropped) %>%
+  dplyr::select(cellid_type, individual, treatment)
+
+# Count number of unique individuals per cell type
+celltype_indiv_counts <- filtered_summary %>%
+  group_by(cellid_type, treatment) %>%
+  dplyr::summarise(num_individuals = n_distinct(individual)) %>%
+  arrange(desc(num_individuals))
+
+# Save table
+write_tsv(celltype_indiv_counts, paste0(pseudobulk_folder_name, "celltype_individual_counts.tsv"))
+#celltype_indiv_counts <- read_tsv(celltype_indiv_counts, paste0(pseudobulk_folder_name, "celltype_individual_counts.tsv"))
+```
+
+
+Donor cutoff of 25
+```{r}
+matrixeqtl_input_folder = "/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/"
+count_thresh = 15
+ct_thresh = 25
+
+for (t in names(sce_list)) {
+  process_treatment_data_with_summary(
+    obj_sce = sce_list[[t]], 
+    treat = t,
+    cell_cutoff = count_thresh,
+    celltype_indiv_filter = ct_thresh,
+    matrixeqtl_folder = matrixeqtl_input_folder
+  )
+}
+
+# Define paths to summary tables
+pseudobulk_folder_name <- paste0(matrixeqtl_input_folder, "/pseudobulk_", count_thresh, "cells_", ct_thresh, "indiv_summary/")
+
+summary_paths <- list(
+  "Ale" = paste0(pseudobulk_folder_name, "cellcount_filter_summary_Ale.tsv"),
+  "Bri" = paste0(pseudobulk_folder_name, "cellcount_filter_summary_Bri.tsv"),
+  "Cer" = paste0(pseudobulk_folder_name, "cellcount_filter_summary_Cer.tsv"),
+  "Cri" = paste0(pseudobulk_folder_name, "cellcount_filter_summary_Cri.tsv"),
+  "Lor" = paste0(pseudobulk_folder_name, "cellcount_filter_summary_Lor.tsv")
+)
+
+# Load all tables and combine them
+summary_list <- lapply(summary_paths, read_tsv)
+combined_summary <- bind_rows(summary_list, .id = "treatment")
+write_tsv(combined_summary, paste0(pseudobulk_folder_name, "cellcount_filter_summary_combined.tsv"))
+
+# Keep only donor-celltype-treatment pairs that passed filtering
+filtered_summary <- combined_summary %>%
+  filter(!dropped) %>%
+  dplyr::select(cellid_type, individual, treatment)
+
+# Count number of unique individuals per cell type
+celltype_indiv_counts <- filtered_summary %>%
+  group_by(cellid_type, treatment) %>%
+  dplyr::summarise(num_individuals = n_distinct(individual)) %>%
+  arrange(desc(num_individuals))
+
+# Save table
+write_tsv(celltype_indiv_counts, paste0(pseudobulk_folder_name, "celltype_individual_counts.tsv"))
+#celltype_indiv_counts <- read_tsv(celltype_indiv_counts, paste0(pseudobulk_folder_name, "celltype_individual_counts.tsv"))
+```
+
+## 1B) Treatment: Filter genes
+```{r}
+print(pseudobulk_folder_name)
+
+pb_ale <- readRDS(paste0(pseudobulk_folder_name, "/pseudo_bulk_Ale.rds"))
+pb_bri <- readRDS(paste0(pseudobulk_folder_name, "/pseudo_bulk_Bri.rds"))
+pb_cer <- readRDS(paste0(pseudobulk_folder_name, "/pseudo_bulk_Cer.rds"))
+pb_cri <- readRDS(paste0(pseudobulk_folder_name, "/pseudo_bulk_Cri.rds"))
+pb_lor <- readRDS(paste0(pseudobulk_folder_name, "/pseudo_bulk_Lor.rds"))
+
+pb_list <- list(
+  Ale = pb_ale,
+  Bri = pb_bri,
+  Cer = pb_cer,
+  Cri = pb_cri,
+  Lor = pb_lor
+)
+
+celltypes <- Reduce(intersect,
+                    list(names(pb_ale),
+                         names(pb_bri),
+                         names(pb_cer),
+                         names(pb_cri),
+                         names(pb_lor)))
+
+ct_thresh = 20
+
+# Save list of valid cell types for filtering
+write_tsv(data.frame(celltypes), 
+          paste0(pseudobulk_folder_name, "valid_celltypes_", ct_thresh, "indiv.tsv"))
+
+# Filter genes
+filter_genes_post_aggregation_lenient(treatments = c("Ale", "Bri", "Cer", "Cri", "Lor"), 
+                              pseudobulk_list = pb_list,
+                              output_prefix = pseudobulk_folder_name, 
+                              protein_coding_genes = HgProteinCodingGenes, 
+                              cellid_types = celltypes)
+
+```
+
+## 1C) Control: Pseudobulk
+
+Pseudobulk control
+```{r}
+matrixeqtl_input_folder = "/project/gilad/geena/publication_clean/matrixeqtl_input/control/"
+count_thresh = 15 # minimum number of pseudobulk cells to keep a pseudobulk sample (15 cells)
+ct_thresh = 1 # since I am going by subset, don't filter by this while pseudobulking until combining again
+
+for (subset_name in names(sce_list_control)) {
+    message("Processing control ", subset_name)
+
+    process_treatment_data_with_summary(
+      obj_sce = sce_list_control[[subset_name]],
+      treat = subset_name, # keeps outputs separate
+      cell_cutoff = count_thresh, 
+      celltype_indiv_filter = ct_thresh, 
+      matrixeqtl_folder = matrixeqtl_input_folder
+    )
+}
+
+
+```
+
+## 1D) Control: Filter genes
+```{r}
+count_thresh = 15
+ct_thresh = 1
+
+# Get paths based on the number of subsets you made earlier
+generate_summary_paths <- function(num_subsets, pseudobulk_folder) {
+  summary_paths <- setNames(
+    lapply(seq_len(num_subsets), function(i) {
+      file.path(pseudobulk_folder, paste0("cellcount_filter_summary_subset", i, ".tsv"))
+    }),
+    paste0("subset", seq_len(num_subsets))
+  )
+  
+  return(summary_paths)
+}
+# Get file paths for each of the subsets
+# Define paths to summary tables
+pseudobulk_folder_name_control <- paste0("/project/gilad/geena/publication_clean/matrixeqtl_input/control/pseudobulk_", count_thresh, "cells_", ct_thresh, "indiv_summary/")
+
+summary_paths <- generate_summary_paths(num_subsets = 10, pseudobulk_folder_name_control)
+print(summary_paths)
+
+# Load all summary tables with pseudobulk counts and combine them
+summary_list <- lapply(summary_paths, read_tsv)
+combined_summary <- bind_rows(summary_list, .id = "subset")
+write_tsv(combined_summary, paste0(pseudobulk_folder_name_control, "cellcount_filter_summary_combined.tsv"))
+
+
+# Keep only donor-celltype pairs that passed filtering
+filtered_summary <- combined_summary %>%
+  filter(!dropped) %>%
+  dplyr::select(cellid_type, individual)
+
+# Count number of unique individuals per cell type
+celltype_indiv_counts <- filtered_summary %>%
+  group_by(cellid_type) %>%
+  summarize(num_individuals = n_distinct(individual)) %>%
+  arrange(desc(num_individuals))
+
+# Save table for debugging
+write_tsv(celltype_indiv_counts, paste0(pseudobulk_folder_name_control, "celltype_individual_counts.tsv"))
+
+celltype_indiv_counts_control <- read_tsv(paste0(pseudobulk_folder_name_control, "celltype_individual_counts.tsv"))
+celltype_indiv_filter <- 20 # Set threshold for minimum number of individuals
+
+# Get valid cell types (24 cell types)
+valid_cell_types_control <- celltype_indiv_counts_control %>%
+  filter(num_individuals >= celltype_indiv_filter) %>%
+  pull(cellid_type)
+
+print(paste("Retaining", length(valid_cell_types_control), "cell types meeting the individual threshold."))
+
+# Save list of valid cell types for filtering
+write_tsv(data.frame(cellid_type = valid_cell_types_control), paste0(pseudobulk_folder_name_control, "/valid_celltypes_", celltype_indiv_filter, "indiv.tsv"))
+
+# Now perform filtering
+print(pseudobulk_folder_name_control)
+
+pb_subset1 <- readRDS(paste0(pseudobulk_folder_name_control, "/pseudo_bulk_subset1.rds"))
+pb_subset2 <- readRDS(paste0(pseudobulk_folder_name_control, "/pseudo_bulk_subset2.rds"))
+pb_subset3 <- readRDS(paste0(pseudobulk_folder_name_control, "/pseudo_bulk_subset3.rds"))
+pb_subset4 <- readRDS(paste0(pseudobulk_folder_name_control, "/pseudo_bulk_subset4.rds"))
+pb_subset5 <- readRDS(paste0(pseudobulk_folder_name_control, "/pseudo_bulk_subset5.rds"))
+pb_subset6 <- readRDS(paste0(pseudobulk_folder_name_control, "/pseudo_bulk_subset6.rds"))
+pb_subset7 <- readRDS(paste0(pseudobulk_folder_name_control, "/pseudo_bulk_subset7.rds"))
+pb_subset8 <- readRDS(paste0(pseudobulk_folder_name_control, "/pseudo_bulk_subset8.rds"))
+pb_subset9 <- readRDS(paste0(pseudobulk_folder_name_control, "/pseudo_bulk_subset9.rds"))
+pb_subset10 <- readRDS(paste0(pseudobulk_folder_name_control, "/pseudo_bulk_subset10.rds"))
+
+
+pb_list_control <- list(
+  subset1 = pb_subset1,
+  subset2 = pb_subset2,
+  subset3 = pb_subset3,
+  subset4 = pb_subset4,
+  subset5 = pb_subset5,
+  subset6 = pb_subset6,
+  subset7 = pb_subset7,
+  subset8 = pb_subset8,
+  subset9 = pb_subset9,
+  subset10 = pb_subset10
+)
+
+# Filter genes
+filter_genes_post_aggregation_lenient(treatments = c("subset1", "subset2", "subset3", "subset4", "subset5",
+                                             "subset6", "subset7", "subset8", "subset9", "subset10"), 
+                              pseudobulk_list = pb_list_control,
+                              output_prefix = pseudobulk_folder_name_control, 
+                              protein_coding_genes = HgProteinCodingGenes, 
+                              cellid_types = valid_cell_types_control,
+                              group_by_treatment = FALSE
+                              )
+
+```
+
+# 2) Covariate per condition
+I am using Elbow rather than BE to choose number of PCs because BE seems to give a lot of PCs (for example, for hepatoblasts K_elbow = 9 but K_BE = 42) which might cause problems later on with MatrixEQTL because there are too many covariates.
+
+```{r}
+# Infer PCs per condition (treatment x cell type)
+infer_PC_celltype_treatment <- function(celltype,
+                                        treatment,
+                                        pseudobulk_dir,
+                                        output_dir,
+                                        meta,
+                                        K_method = "elbow",
+                                        sample_pattern = NULL) {
+
+  message("Processing: ", celltype, " | ", treatment)
+
+  exp_path <- file.path(
+    pseudobulk_dir,
+    paste0(celltype, "_all_postqc_tmm_logcpm_int.txt")
+  )
+
+  exp <- read.table(exp_path, header = TRUE, row.names = 1)
+  exp <- t(as.matrix(exp))
+
+  # subset to this treatment (or keep everything if control because in control colnames have _subset instead of _Control)
+  if (!is.null(sample_pattern)) {
+    keep <- grepl(sample_pattern, rownames(exp))
+    exp <- exp[keep, ]
+  } else if (treatment != "Control") {
+    keep <- grepl(paste0("_", treatment, "$"), rownames(exp))
+    exp <- exp[keep, ]
+  } else {
+    ## Control: keep ALL samples
+    message("Control, keeping all samples")
+  }
+
+  ## PCA
+  prcompResult <- prcomp(exp, center = TRUE, scale. = TRUE)
+  PCs <- prcompResult$x
+
+  ## choose K
+  K_elbow <- runElbow(prcompResult = prcompResult)
+  set.seed(1)
+  K_BE <- runBE(exp, B = 20, alpha = 0.05, mc.cores = 1)$numOfPCsChosen
+
+  # Write output of different PCs from 1:n_PC
+  if (K_method == "elbow") {
+    K = K_elbow
+  } else if (K_method == "BE") {
+    K = min(K_BE, ncol(PCs)-10) # Don't really need many PCs due to small sample size
+  }
+
+  ## known covariate: sex
+  sample_ids <- rownames(exp)
+  knownCov <- data.frame(
+    sex = meta[match(sub("^(.*?)_.*$", "\\1", sample_ids),
+                     meta$individual), "sex"]
+  ) %>%
+    mutate(sex = ifelse(sex == "M", 1, 0))
+  rownames(knownCov) <- sample_ids
+
+  PCsTop <- scale(PCs[,1:K])
+
+  filteredCov <- filterKnownCovariates(
+    knownCov, PCsTop, unadjustedR2_cutoff = 0.9
+  )
+
+  covariatesToUse <- t(cbind(PCsTop, sex = filteredCov))
+  id <- gsub("PC", "expPC", rownames(covariatesToUse))
+  final_cov <- cbind(id, covariatesToUse)
+
+  outdir <- file.path(output_dir, "pheno_by_treatment")
+  dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+  outfile <- paste0(celltype, "_", treatment, "_", K, "phenoPC.txt")
+
+  write.table(
+    final_cov,
+    file.path(outdir, outfile),
+    row.names = FALSE,
+    col.names = TRUE,
+    quote = FALSE,
+    sep = "\t"
+  )
+
+  message("Saved: ", outfile)
+}
+
+# Main function to loop through all cell types and treatments
+create_cov_celltype_treatment <- function(pseudobulk_dir,
+                                          meta,
+                                          treatments) {
+
+  output_dir <- file.path(pseudobulk_dir, "cov_elbow")
+  dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+  pseudobulk_list <- list.files(
+    pseudobulk_dir,
+    pattern = "_all_postqc_tmm_logcpm_int.txt"
+  )
+
+  celltypes <- sub("_all_postqc_tmm_logcpm_int.txt", "", pseudobulk_list)
+
+  for (ct in celltypes) {
+    for (tr in treatments) {
+      infer_PC_celltype_treatment(
+        celltype = ct,
+        treatment = tr,
+        pseudobulk_dir = pseudobulk_dir,
+        output_dir = output_dir,
+        meta = meta
+      )
+    }
+  }
+}
+
+```
+
+Treatment
+```{r}
+# Import sex information for individuals
+ALK_sex <- read.csv("/project/gilad/geena/ALK_analysis/ALK_sex.csv")
+ALK_sex$line <- paste0("NA", ALK_sex$line)
+ALK_sex <- ALK_sex %>% dplyr::rename("individual" = "line")
+
+# Left-join available sex information
+meta_all <- treatment_rds@meta.data
+meta_all <- left_join(meta_all, ALK_sex, by= "individual")
+
+# Metadata for each sample (where sample is treatment_individual, i.e. "Cri_NA18522")
+meta_treat <- meta_all %>% 
+ select(c(batch, treatment, individual, sex)) %>% 
+  mutate(sample = paste(treatment, individual, sep = "_")) %>% 
+  distinct(.keep_all = T)
+
+saveRDS(meta_treat, "/project/gilad/geena/publication_clean/results/treatment/celltype_annotation/postQC_lognorm_batch1_2_3_4_all_metadata_bysample")
+
+meta_treat <- readRDS("/project/gilad/geena/publication_clean/results/treatment/celltype_annotation/postQC_lognorm_batch1_2_3_4_all_metadata_bysample")
+
+# Set directories
+matrixeqtl_input_folder = "/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/"
+pseudobulk_folder_name <- paste0(matrixeqtl_input_folder, "/pseudobulk_15cells_20indiv_summary/")
+pb_sub_dir <- paste0(pseudobulk_folder_name, "/normalized_celltypes_medianUMI1/logcpm_int/") 
+
+# Get covariates for lenient gene-level filter
+create_cov_celltype_treatment(pseudobulk_dir = pb_sub_dir, 
+                           meta = meta_treat, 
+                           treatments = c("Ale", "Bri", "Cri", "Cer", "Lor"))
+```
+
+
+Control 
+```{r}
+pseudobulk_folder_name_control <- paste0("/project/gilad/geena/publication_clean/matrixeqtl_input/control/pseudobulk_15cells_1indiv_summary/")
+print(pseudobulk_folder_name_control)
+pb_sub_dir_control <- paste0(pseudobulk_folder_name_control, "/normalized_celltypes_medianUMI1/logcpm_int/") 
+
+# Get covariates for lenient gene-level filter
+create_cov_celltype_treatment(pseudobulk_dir = pb_sub_dir_control, 
+                           meta = meta_control, 
+                           treatments = "Control")
+
+```

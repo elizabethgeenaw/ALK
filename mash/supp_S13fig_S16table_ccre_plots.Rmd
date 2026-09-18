@@ -1,0 +1,410 @@
+---
+title: "functional_annotations_v2"
+output: html_document
+date: '2025-06-30'
+---
+
+# cCRE enrichment plots
+
+Enrichment results are pre-computed by `run_ccre_enrichment.R`
+This Rmd loads the saved RDS files and generates all plots.
+
+```{r setup}
+library(tidyverse)
+library(ggforce)
+mash_folder <- "/project/gilad/geena/publication_clean/results/mash/medianUMI1/"
+lfcs <- c(2, 3, 3.5, 4, 5, 6, 7, 8, 9, 10)
+```
+
+## 1) Plotting functions
+```{r plot_functions}
+drop_control <- function(df) filter(df, treatment != "Control")
+
+add_sig_label <- function(df) {
+  df %>% mutate(sig_label = case_when(
+    p_value < 0.001 ~ "***", p_value < 0.01 ~ "**",
+    p_value < 0.05 ~ "*", TRUE ~ ""
+  ))
+}
+
+add_log2_or <- function(df) {
+  df %>%
+    mutate(
+      log2_or      = log2(odds_ratio),
+      log2_conf_lo = log2(conf_low),
+      log2_conf_hi = log2(conf_high)
+    ) %>%
+    add_sig_label()
+}
+
+######### Response/Nonresponse vs Background plots ########
+plot_ccre_condition_paginated <- function(cond_res, lfc, plot_dir,
+                                          n_celltypes_per_page = 5,
+                                          width = 16, height = 12) {
+  df <- cond_res %>%
+    filter(treatment != "Control") %>%
+    mutate(
+      cCRE_class = factor(cCRE_class, levels = c("PLS", "pELS", "dELS")),
+      group      = factor(group, levels = c("Response", "Nonresponse"))
+    ) %>%
+    add_sig_label()
+
+  n_pages <- ceiling(length(unique(df$celltype)) / n_celltypes_per_page)
+
+  pdf(file.path(plot_dir, paste0("ccre_enrich_condition_lfc", lfc, ".pdf")),
+      width = width, height = height)
+
+  for (i in seq_len(n_pages)) {
+    p <- ggplot(df, aes(x = cCRE_class, y = odds_ratio, fill = group)) +
+      geom_hline(yintercept = 1, linetype = 2, alpha = 0.6) +
+      geom_col(position = position_dodge(0.7), width = 0.6) +
+      geom_errorbar(aes(ymin = conf_low, ymax = conf_high),
+                    position = position_dodge(0.7), width = 0.2) +
+      geom_text(aes(label = sig_label, y = conf_high * 1.05),
+                position = position_dodge(0.7), vjust = 0, size = 4) +
+      scale_fill_manual(values = c("Response" = "#f53224", "Nonresponse" = "#619CFF")) +
+      scale_y_continuous(expand = expansion(mult = c(0.03, 0.1))) +
+      labs(x = "cCRE class", y = "Odds ratio (vs nonresponse background)",
+           title = paste0("Condition-level cCRE enrichment: fold-change ", lfc,
+                          " (page ", i, "/", n_pages, ")")) +
+      ggforce::facet_grid_paginate(
+        celltype ~ treatment, scales = "free_y",
+        nrow = n_celltypes_per_page,
+        ncol = length(unique(df$treatment)),
+        page = i
+      ) +
+      theme_bw(base_size = 11) +
+      theme(axis.text.x = element_text(angle = 25, hjust = 1),
+            panel.spacing.y = unit(0.4, "lines"),
+            panel.clip = "off")
+    print(p)
+  }
+  dev.off()
+}
+
+plot_ccre_treatment <- function(df, title_prefix) {
+  df <- df %>%
+    filter(treatment != "Control") %>%
+    mutate(
+      cCRE_class = factor(cCRE_class, levels = c("PLS", "pELS", "dELS")),
+      group      = factor(group, levels = c("Response", "Nonresponse"))
+    ) %>%
+    add_sig_label()
+
+  ggplot(df, aes(x = cCRE_class, y = odds_ratio, fill = group)) +
+    geom_hline(yintercept = 1, linetype = 2, alpha = 0.6) +
+    geom_col(position = position_dodge(0.7), width = 0.6) +
+    geom_errorbar(aes(ymin = conf_low, ymax = conf_high),
+                  position = position_dodge(0.7), width = 0.2) +
+    geom_text(aes(label = sig_label, y = conf_high),
+              position = position_dodge(0.7), vjust = -0.1, size = 4) +
+    facet_wrap(~ treatment, nrow = 1, scales = "free_y") +
+    scale_fill_manual(values = c("Response" = "#f53224", "Nonresponse" = "#619CFF")) +
+    scale_y_continuous(expand = expansion(mult = c(0.03, 0.06))) +
+    labs(x = "cCRE class", y = "Odds ratio", title = title_prefix, fill = NULL) +
+    theme_bw(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 25, hjust = 1))
+}
+
+plot_ccre_celltype_paginated <- function(celltype_res, lfc, plot_dir,
+                                          n_celltypes_per_page = 3, ncol = 4,
+                                          width = 14, height = 10) {
+  df <- celltype_res %>%
+    mutate(
+      cCRE_class = factor(cCRE_class, levels = c("PLS", "pELS", "dELS")),
+      group      = factor(group, levels = c("Response", "Nonresponse"))
+    ) %>%
+    add_sig_label()
+
+  celltypes <- unique(df$celltype)
+  panels_per_page <- n_celltypes_per_page * ncol
+  n_pages <- ceiling(length(celltypes) / panels_per_page)
+  if (n_pages == 0) { message("No celltypes to plot"); return(invisible(NULL)) }
+
+  pdf(file.path(plot_dir, paste0("ccre_enrich_celltype_lfc", lfc, ".pdf")),
+      width = width, height = height)
+
+  for (i in seq_len(n_pages)) {
+    idx_start <- (i - 1) * panels_per_page + 1
+    idx_end   <- min(i * panels_per_page, length(celltypes))
+    ct_subset <- celltypes[idx_start:idx_end]
+    if (length(ct_subset) == 0) next
+
+    p <- ggplot(df %>% filter(celltype %in% ct_subset),
+                aes(x = cCRE_class, y = odds_ratio, fill = group)) +
+      geom_hline(yintercept = 1, linetype = 2, alpha = 0.6) +
+      geom_col(position = position_dodge(0.7), width = 0.6) +
+      geom_errorbar(aes(ymin = conf_low, ymax = conf_high),
+                    position = position_dodge(0.7), width = 0.2) +
+      geom_text(aes(label = sig_label, y = conf_high * 1.03),
+                position = position_dodge(0.7), size = 3.5, vjust = 0) +
+      scale_fill_manual(values = c("Response" = "#f53224", "Nonresponse" = "#619CFF")) +
+      facet_wrap(~ celltype, ncol = ncol, scales = "free_y") +
+      labs(x = "cCRE class", y = "Odds ratio (vs nonresponse background)",
+           title = paste0("Celltype-level cCRE enrichment: fold-change ", lfc,
+                          " (page ", i, "/", n_pages, ")")) +
+      theme_bw(base_size = 11) +
+      theme(strip.text = element_text(size = 9, face = "bold"),
+            axis.text.x = element_text(angle = 25, hjust = 1),
+            panel.spacing = unit(0.6, "lines"))
+    print(p)
+  }
+  dev.off()
+}
+
+plot_ccre_global <- function(df, title_prefix) {
+  df <- df %>%
+    mutate(
+      cCRE_class = factor(cCRE_class, levels = c("PLS", "pELS", "dELS")),
+      group      = factor(group, levels = c("Response", "Nonresponse"))
+    ) %>%
+    add_sig_label()
+
+  ggplot(df, aes(x = cCRE_class, y = odds_ratio, fill = group)) +
+    geom_hline(yintercept = 1, linetype = 2, alpha = 0.6) +
+    geom_col(position = position_dodge(0.7), width = 0.6) +
+    geom_errorbar(aes(ymin = conf_low, ymax = conf_high),
+                  position = position_dodge(0.7), width = 0.2) +
+    geom_text(aes(label = sig_label, y = conf_high),
+              position = position_dodge(0.7), vjust = -0.1, size = 5) +
+    scale_fill_manual(values = c("Response" = "#f53224", "Nonresponse" = "#619CFF")) +
+    scale_y_continuous(expand = expansion(mult = c(0.03, 0.06))) +
+    labs(x = "cCRE class", y = "Odds ratio", title = title_prefix, fill = NULL) +
+    theme_bw(base_size = 12)
+}
+
+######## Response vs Nonresponse plots #########
+plot_resp_vs_nonresp_condition_paginated <- function(df, lfc, plot_dir,
+                                                      n_conditions_per_page = 8,
+                                                      ncol = 4,
+                                                      width = 14, height = 10) {
+  df <- add_log2_or(df) %>%
+    filter(treatment != "Control") %>%
+    mutate(
+      cCRE_class = factor(cCRE_class, levels = c("PLS", "pELS", "dELS")),
+      condition = paste(celltype, treatment, sep = " | ")
+    )
+
+  conditions <- unique(df$condition)
+  n_pages <- ceiling(length(conditions) / n_conditions_per_page)
+
+  pdf(file.path(plot_dir, paste0("resp_vs_nonresp_condition_lfc", lfc, ".pdf")),
+      width = width, height = height)
+
+  for (i in seq_len(n_pages)) {
+    idx <- ((i - 1) * n_conditions_per_page + 1):(i * n_conditions_per_page)
+    cond_subset <- conditions[idx]
+    cond_subset <- cond_subset[!is.na(cond_subset)]
+
+    p <- ggplot(df %>% filter(condition %in% cond_subset),
+                aes(x = cCRE_class, y = log2_or)) +
+      geom_hline(yintercept = 0, linetype = 2, alpha = 0.7) +
+      geom_col(width = 0.6, fill = "#6BAED6") +
+      geom_errorbar(aes(ymin = log2_conf_lo, ymax = log2_conf_hi), width = 0.2) +
+      geom_text(aes(label = sig_label, y = log2_conf_hi), size = 3.5, vjust = -0.2) +
+      facet_wrap(~ condition, ncol = ncol, scales = "free_y") +
+      labs(x = "cCRE class", y = "log2 odds ratio (Response vs Nonresponse)",
+           title = paste0("Condition-level Response vs Nonresponse cCRE enrichment: fold-change ",
+                          lfc, " (page ", i, "/", n_pages, ")")) +
+      theme_bw(base_size = 11) +
+      theme(strip.text = element_text(size = 9, face = "bold"),
+            axis.text.x = element_text(angle = 25, hjust = 1),
+            panel.spacing = unit(0.6, "lines"))
+    print(p)
+  }
+  dev.off()
+}
+
+plot_resp_vs_nonresp_global <- function(df, title) {
+  df <- add_log2_or(df) %>%
+    mutate(cCRE_class = factor(cCRE_class, levels = c("PLS", "pELS", "dELS")))
+
+  ggplot(df, aes(x = cCRE_class, y = log2_or)) +
+    geom_hline(yintercept = 0, linetype = 2, alpha = 0.7) +
+    geom_col(width = 0.6, fill = "#6BAED6") +
+    geom_errorbar(aes(ymin = log2_conf_lo, ymax = log2_conf_hi), width = 0.2) +
+    geom_text(aes(label = sig_label, y = log2_conf_hi), vjust = -0.3, size = 5) +
+    labs(x = "cCRE class", y = "log2 odds ratio (Response vs Nonresponse)", title = title) +
+    theme_bw(base_size = 12)
+}
+
+plot_resp_vs_nonresp_treatment <- function(df, title) {
+  df <- df %>%
+    filter(treatment != "Control") %>%
+    add_log2_or() %>%
+    mutate(cCRE_class = factor(cCRE_class, levels = c("PLS", "pELS", "dELS")))
+
+  ggplot(df, aes(x = cCRE_class, y = log2_or)) +
+    geom_hline(yintercept = 0, linetype = 2, alpha = 0.7) +
+    geom_col(width = 0.6, fill = "#6BAED6") +
+    geom_errorbar(aes(ymin = log2_conf_lo, ymax = log2_conf_hi), width = 0.2) +
+    geom_text(aes(label = sig_label, y = log2_conf_hi), vjust = -0.3, size = 4) +
+    facet_wrap(~ treatment, nrow = 1, scales = "free_y") +
+    labs(x = "cCRE class", y = "log2 odds ratio (Response vs Nonresponse)", title = title) +
+    theme_bw(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 25, hjust = 1))
+}
+
+plot_resp_vs_nonresp_celltype_paginated <- function(df, lfc, plot_dir,
+                                                     n_celltypes_per_page = 3,
+                                                     ncol = 4,
+                                                     width = 14, height = 10) {
+  df <- add_log2_or(df) %>%
+    mutate(cCRE_class = factor(cCRE_class, levels = c("PLS", "pELS", "dELS")))
+
+  celltypes <- unique(df$celltype)
+  panels_per_page <- n_celltypes_per_page * ncol
+  n_pages <- ceiling(length(celltypes) / panels_per_page)
+
+  pdf(file.path(plot_dir, paste0("resp_vs_nonresp_celltype_lfc", lfc, ".pdf")),
+      width = width, height = height)
+
+  for (i in seq_len(n_pages)) {
+    idx <- ((i - 1) * panels_per_page + 1):(i * panels_per_page)
+    ct_subset <- celltypes[idx]
+    ct_subset <- ct_subset[!is.na(ct_subset)]
+
+    p <- ggplot(df %>% filter(celltype %in% ct_subset),
+                aes(x = cCRE_class, y = log2_or)) +
+      geom_hline(yintercept = 0, linetype = 2, alpha = 0.7) +
+      geom_col(width = 0.6, fill = "#6BAED6") +
+      geom_errorbar(aes(ymin = log2_conf_lo, ymax = log2_conf_hi), width = 0.2) +
+      geom_text(aes(label = sig_label, y = log2_conf_hi), size = 3.5, vjust = -0.2) +
+      facet_wrap(~ celltype, ncol = ncol, scales = "free_y") +
+      labs(x = "cCRE class", y = "log2 odds ratio (Response vs Nonresponse)",
+           title = paste0("Response vs Nonresponse cCRE enrichment: fold-change ",
+                          lfc, " (page ", i, "/", n_pages, ")")) +
+      theme_bw(base_size = 11) +
+      theme(strip.text = element_text(size = 9, face = "bold"),
+            axis.text.x = element_text(angle = 25, hjust = 1),
+            panel.spacing = unit(0.6, "lines"))
+    print(p)
+  }
+  dev.off()
+}
+```
+
+## 2) Response/Nonresponse vs Background enrichment
+```{r run_vs_background}
+results_all <- readRDS(file.path(mash_folder, "ccre_enrichment_vs_background.rds"))
+
+for (lfc in lfcs) {
+  plot_dir_lfc <- file.path(mash_folder, paste0("lfc", lfc), "plots")
+  dir.create(plot_dir_lfc, recursive = TRUE, showWarnings = FALSE)
+
+  res <- results_all[[paste0("lfc", lfc)]]
+
+  plot_ccre_condition_paginated(res$condition, lfc, plot_dir_lfc, n_celltypes_per_page = 5)
+
+  p_tx <- plot_ccre_treatment(res$treatment,
+                              paste0("Treatment-level cCRE enrichment: fold-change ", lfc))
+  ggsave(file.path(plot_dir_lfc, paste0("ccre_enrich_treatment_lfc", lfc, ".pdf")),
+         p_tx, width = 15, height = 7)
+
+  plot_ccre_celltype_paginated(res$celltype, lfc, plot_dir_lfc,
+                                n_celltypes_per_page = 3, ncol = 4)
+
+  p_gl <- plot_ccre_global(res$global,
+                           paste0("Global cCRE enrichment: fold-change ", lfc))
+  ggsave(file.path(plot_dir_lfc, paste0("ccre_enrich_global_lfc", lfc, ".pdf")),
+         p_gl, width = 6, height = 5)
+}
+```
+
+## 3) Tables: Response/Nonresponse vs Background
+```{r table_vs_background}
+table_dir <- file.path(mash_folder, "tables")
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Global table
+global_bg_tbl <- map_dfr(lfcs, function(lfc) {
+  results_all[[paste0("lfc", lfc)]]$global %>% mutate(lfc = lfc)
+}) %>%
+  select(lfc, cCRE_class, group, odds_ratio, conf_low, conf_high, p_value) %>%
+  arrange(lfc, factor(cCRE_class, levels = c("PLS", "pELS", "dELS")), group)
+
+write_tsv(global_bg_tbl, file.path(table_dir, "ccre_enrichment_global_vs_background.tsv"))
+
+# Treatment-level table
+tx_bg_tbl <- map_dfr(lfcs, function(lfc) {
+  results_all[[paste0("lfc", lfc)]]$treatment %>% mutate(lfc = lfc)
+}) %>%
+  filter(treatment != "Control") %>%
+  select(lfc, treatment, cCRE_class, group, odds_ratio, conf_low, conf_high, p_value) %>%
+  arrange(lfc, treatment, factor(cCRE_class, levels = c("PLS", "pELS", "dELS")), group)
+
+write_tsv(tx_bg_tbl, file.path(table_dir, "ccre_enrichment_treatment_vs_background.tsv"))
+
+# Celltype-level table
+ct_bg_tbl <- map_dfr(lfcs, function(lfc) {
+  results_all[[paste0("lfc", lfc)]]$celltype %>% mutate(lfc = lfc)
+}) %>%
+  select(lfc, celltype, cCRE_class, group, odds_ratio, conf_low, conf_high, p_value) %>%
+  arrange(lfc, celltype, factor(cCRE_class, levels = c("PLS", "pELS", "dELS")), group)
+
+write_tsv(ct_bg_tbl, file.path(table_dir, "ccre_enrichment_celltype_vs_background.tsv"))
+
+message("Saved vs-background tables to: ", table_dir)
+```
+
+## 4) Response vs Nonresponse enrichment
+```{r run_resp_vs_nonresp}
+results_all_r_nr <- readRDS(file.path(mash_folder, "ccre_enrichment_resp_vs_nonresp.rds"))
+
+for (lfc in lfcs) {
+  plot_dir_lfc <- file.path(mash_folder, paste0("lfc", lfc), "plots")
+  dir.create(plot_dir_lfc, recursive = TRUE, showWarnings = FALSE)
+
+  res <- results_all_r_nr[[paste0("lfc", lfc)]]
+
+  plot_resp_vs_nonresp_condition_paginated(res$condition, lfc, plot_dir_lfc,
+                                            n_conditions_per_page = 12, ncol = 4)
+
+  p_gl_rnr <- plot_resp_vs_nonresp_global(
+    res$global, paste0("Global Response vs Nonresponse cCRE enrichment: fold-change ", lfc))
+  ggsave(file.path(plot_dir_lfc, paste0("resp_vs_nonresp_global_lfc", lfc, ".pdf")),
+         p_gl_rnr, width = 6, height = 5)
+
+  p_tx_rnr <- plot_resp_vs_nonresp_treatment(
+    res$treatment, paste0("Treatment-level Response vs Nonresponse cCRE enrichment: fold-change ", lfc))
+  ggsave(file.path(plot_dir_lfc, paste0("resp_vs_nonresp_treatment_lfc", lfc, ".pdf")),
+         p_tx_rnr, width = 15, height = 7)
+
+  plot_resp_vs_nonresp_celltype_paginated(res$celltype, lfc, plot_dir_lfc,
+                                           n_celltypes_per_page = 3, ncol = 4)
+}
+```
+
+## 5) Tables: Response vs Nonresponse
+```{r table_resp_vs_nonresp}
+# Global table
+global_rnr_tbl <- map_dfr(lfcs, function(lfc) {
+  results_all_r_nr[[paste0("lfc", lfc)]]$global %>% mutate(lfc = lfc)
+}) %>%
+  select(lfc, cCRE_class, odds_ratio, conf_low, conf_high, p_value) %>%
+  arrange(lfc, factor(cCRE_class, levels = c("PLS", "pELS", "dELS")))
+
+write_tsv(global_rnr_tbl, file.path(table_dir, "ccre_enrichment_global_resp_vs_nonresp.tsv"))
+
+# Treatment-level table
+tx_rnr_tbl <- map_dfr(lfcs, function(lfc) {
+  results_all_r_nr[[paste0("lfc", lfc)]]$treatment %>% mutate(lfc = lfc)
+}) %>%
+  filter(treatment != "Control") %>%
+  select(lfc, treatment, cCRE_class, odds_ratio, conf_low, conf_high, p_value) %>%
+  arrange(lfc, treatment, factor(cCRE_class, levels = c("PLS", "pELS", "dELS")))
+
+write_tsv(tx_rnr_tbl, file.path(table_dir, "ccre_enrichment_treatment_resp_vs_nonresp.tsv"))
+
+# Celltype-level table
+ct_rnr_tbl <- map_dfr(lfcs, function(lfc) {
+  results_all_r_nr[[paste0("lfc", lfc)]]$celltype %>% mutate(lfc = lfc)
+}) %>%
+  select(lfc, celltype, cCRE_class, odds_ratio, conf_low, conf_high, p_value) %>%
+  arrange(lfc, celltype, factor(cCRE_class, levels = c("PLS", "pELS", "dELS")))
+
+write_tsv(ct_rnr_tbl, file.path(table_dir, "ccre_enrichment_celltype_resp_vs_nonresp.tsv"))
+
+message("Saved resp-vs-nonresp tables to: ", table_dir)
+```
+

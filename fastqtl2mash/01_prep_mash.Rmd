@@ -1,0 +1,225 @@
+---
+title: "prep_mash_input"
+output: html_document
+date: '2025-03-13'
+---
+
+# Combine MatrixEQTL chromosomes for each treatment-celltype
+The matrixEQTL results are in the /project/gilad/geena/ALK_analysis/results/control/matrixeqtl_single/ or /treatment/matrixeqtl_single/ folders.
+Once I input the result folder names I want to use I:
+1) Combine the chromosomes since I ran matrixeqtl on each chr separately  (saved under /results/matrixeqtl_combined_results/<folder_name>/*combine_chr/*)
+2) Calculate SE and reformat as fastQTL format and output into compressed .gz files (saved under /results/matrixeqtl_combined_results/<folder_name>/*fastqtl_like/*)
+
+
+# Reformat as FastQTL
+Combine chromosomes for each celltype-condition and save in /project/gilad/geena/ALK_analysis/results/matrixeqtl_combined_results/update_3.13.25/combine_chr
+
+Get all cell types in common between control and treatment
+
+```{r}
+library(dplyr)
+library(readr)
+library(data.table)
+
+# Define paths for control and treatment results
+control_folder <- "/project/gilad/geena/publication_clean/results/control/matrixeqtl/medianUMI1_updated4.29.26"
+treatment_folder <- "/project/gilad/geena/publication_clean/results/treatment/matrixeqtl/medianUMI1_updated4.29.26"
+
+# List all files
+control_files <- list.files(control_folder, pattern = "_cis.txt$", full.names = FALSE)
+treatment_files <- list.files(treatment_folder, pattern = "_cis.txt$", full.names = FALSE)
+
+# Function to extract cell type from filenames
+extract_cell_type <- function(filenames) {
+  cell_types <- sub("^[^_]+_", "", filenames)  # Remove the first part (treatment or "Control")
+  cell_types <- sub("_chr[0-9XY]+_cis.txt$", "", cell_types)  # Remove chromosome info and suffix
+  unique(cell_types)  # Return unique cell types
+}
+
+# Get cell types from control and treatment
+control_cell_types <- extract_cell_type(control_files) # 26 cell types
+treatment_cell_types <- extract_cell_type(treatment_files) 
+
+# Find common cell types
+common_cell_types <- intersect(control_cell_types, treatment_cell_types)
+print("Cell types in common between treatment and control analysis:")
+print(common_cell_types)
+
+```
+
+```{r}
+# Define conditions, chromosomes, and output directory
+conditions <- c("Control", "Ale", "Bri", "Cer", "Cri", "Lor")
+chromosomes <- paste0("chr", 1:22)  # Chromosomes 1-22
+
+# Define the output folder for combined results
+combined_folder <- "/project/gilad/geena/publication_clean/results/combined/medianUMI1/combine_chr/"
+if (!dir.exists(combined_folder)) dir.create(combined_folder, recursive = TRUE)
+
+# Iterate over cell types and conditions
+for (cell_type in common_cell_types) {
+  for (condition in conditions) {
+    # Set input folder based on condition
+    input_folder <- ifelse(condition == "Control", control_folder, treatment_folder) # control_folder and treatment_folder set in previous chunk
+    
+    combined_results <- list()  # Store results
+    
+    for (chr in chromosomes) {
+      input_file <- file.path(input_folder, paste0(condition, "_", cell_type, "_", chr, "_cis.txt"))
+      
+      if (file.exists(input_file)) {
+        chr_data <- fread(input_file)
+        
+        if (nrow(chr_data) > 0) {
+          combined_results[[chr]] <- chr_data
+          print(paste0("Loaded: ", condition, " ", cell_type, " ", chr))
+        } else {
+          print(paste0("File is empty for: ", condition, " ", cell_type, " ", chr))
+        }
+      } else {
+        print(paste0("File not found: ", input_file))
+      }
+    }
+    
+    # Combine results and save
+    if (length(combined_results) > 0) {
+      all_data <- bind_rows(combined_results)
+      output_file <- file.path(combined_folder, paste0(condition, "_", cell_type, "_combined_cis.txt"))
+      write_tsv(all_data, file = output_file, col_names = TRUE)
+      print(paste0("Saved combined results for: ", condition, " ", cell_type))
+    } else {
+      print(paste0("No valid data found for: ", condition, " ", cell_type))
+    }
+  }
+}
+
+```
+
+
+Now that the chromosomes are combined for each treatment-condition, reformat to match fastQTL format in order to use fastQTL2mash code.
+
+NOTE: Wenhe found that when calculating standard error we need to use p-value rather than t-value at our (smaller) sample sizes which can lead to more false positives because SE is underestimated
+
+mash assumes normal distribution, and input to mash is beta and SE; in smaller sample sizes when t-statistic skewed, then using SE = beta/t can lead to oversignificance (false positives) bc SE is underestimated; affects smaller sample size -> instead of using beta/t, use beta and p-value
+
+
+```{r}
+# Define input and output folders
+input_folder <- "/project/gilad/geena/publication_clean/results/combined/medianUMI1/combine_chr/"
+output_folder <- "/project/gilad/geena/publication_clean/results/combined/medianUMI1/fastqtl_like/"
+
+# Create output folder if it doesn't exist
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder, recursive = TRUE)
+}
+
+# Define conditions and cell types
+conditions <- c("Control", "Ale", "Bri", "Cer", "Cri", "Lor")
+
+# Iterate over cell types and conditions
+for (cell_type in common_cell_types) {
+  for (condition in conditions) {
+    # Construct the input file path
+    input_file <- paste0(input_folder, condition, "_", cell_type, "_combined_cis.txt")
+    
+    # Check if the file exists
+    if (file.exists(input_file)) {
+      # Read the combined file
+      results <- fread(input_file) %>%
+        # NOTE: use p-value not t-value
+        mutate(se_beta=abs(beta/qnorm(pvalue/2))) %>%  # Calculate standard error
+        dplyr::select(gene, snps, beta, se_beta, pvalue) %>%  # Select required columns
+        na.omit() %>%  # Remove rows with missing values
+        arrange(gene)  # Sort by gene
+      
+      # Construct the output file path
+      output_file <- paste0(output_folder, cell_type, "_", condition, "_formash.out.gz")
+      
+      # Write the results to the output file
+      write_tsv(results, file = output_file, col_names = TRUE, quote = "none")
+      print(paste0("Processed: ", cell_type, " ", condition))
+    } else {
+      print(paste0("File not found: ", input_file))
+    }
+  }
+}
+```
+
+
+# Create list files
+Instead of looking just at mash within cell types across conditions, I can look at all conditions and cell types jointly (in input file) and then once I run mash, it will create an output for each celltype_condition column and then depending on whether I want to look at sharing across treatments or sharing across cell types then I can just subset the columns. In order to do this there needs to be more genes shared across cell types (so more lenient gene filtering?).
+
+In order to do this I created a .list file called all_treatments_joint.list that included all celltype x treatment combinations, for example:
+~/Desktop/mash_update3.13.25/fastqtl_like/Bronchiolar_and_alveolar_epithelial_cells_Ale_formash.out.gz
+~/Desktop/mash_update3.13.25/fastqtl_like/Bronchiolar_and_alveolar_epithelial_cells_Bri_formash.out.gz
+~/Desktop/mash_update3.13.25/fastqtl_like/Bronchiolar_and_alveolar_epithelial_cells_Cer_formash.out.gz
+~/Desktop/mash_update3.13.25/fastqtl_like/Bronchiolar_and_alveolar_epithelial_cells_Control_formash.out.gz
+~/Desktop/mash_update3.13.25/fastqtl_like/Bronchiolar_and_alveolar_epithelial_cells_Cri_formash.out.gz
+~/Desktop/mash_update3.13.25/fastqtl_like/Bronchiolar_and_alveolar_epithelial_cells_Lor_formash.out.gz
+~/Desktop/mash_update3.13.25/fastqtl_like/Cardiac_mesoderm_cells_Ale_formash.out.gz
+~/Desktop/mash_update3.13.25/fastqtl_like/Cardiac_mesoderm_cells_Bri_formash.out.gz
+~/Desktop/mash_update3.13.25/fastqtl_like/Cardiac_mesoderm_cells_Cer_formash.out.gz
+~/Desktop/mash_update3.13.25/fastqtl_like/Cardiac_mesoderm_cells_Control_formash.out.gz
+~/Desktop/mash_update3.13.25/fastqtl_like/Cardiac_mesoderm_cells_Cri_formash.out.gz
+~/Desktop/mash_update3.13.25/fastqtl_like/Cardiac_mesoderm_cells_Lor_formash.out.gz
+
+This was the code I used locally to create a file with all treatment_celltype combinations so that I can run mash jointly across all cell types and treatments
+```{r}
+# Define input folder
+input_folder <- "/project/gilad/geena/publication_clean/results/combined/medianUMI1/fastqtl_like"
+
+# List all files (only filenames, no full path)
+files <- list.files(input_folder, full.names = FALSE)
+
+# Create the full paths
+new_paths <- file.path(input_folder, files)
+
+# Replace spaces with underscores
+#files_clean <- gsub(" ", "_", files)
+#new_paths <- file.path(input_folder, files_clean)
+
+# Save to list
+writeLines(new_paths, "/project/gilad/geena/publication_clean/code/fastqtl2mash/medianUMI1.list")
+
+```
+
+First, on midway3, pull the hdf5tools docker image and save it as a sif (singularity image file):
+In midway3 terminal run:
+```{bash}
+#module load apptainer
+
+#export APPTAINER_CACHEDIR=/tmp/$USER
+#export APPTAINER_TMPDIR=/tmp/$USER
+#mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
+
+## Set directory to wherever you want the .sif to live so you can call it from your script
+#SIF=/project/gilad/geena/hdf5tools.sif
+
+#apptainer pull "$SIF" docker://gaow/hdf5tools:latest
+```
+
+Now run using
+```{bash}
+#sbatch /project/gilad/geena/publication_clean/code/fastqtl2mash/submit_fastqtl2mash.sbatch
+```
+
+# Check mash input
+```{r}
+library(data.table)
+
+# Read your all_treatments_joint.list
+list_file <- "/project/gilad/geena/publication_clean/code/fastqtl2mash/medianUMI1.list"
+files <- readLines(list_file)
+
+# Extract gene sets
+gene_sets <- lapply(files, function(f) {
+  fread(f, select = "gene")$gene
+})
+
+names(gene_sets) <- basename(files)
+
+shared_genes_all <- Reduce(intersect, gene_sets)
+length(shared_genes_all)
+
+```
+

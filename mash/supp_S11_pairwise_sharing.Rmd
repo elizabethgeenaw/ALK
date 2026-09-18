@@ -1,0 +1,479 @@
+---
+title: "Pairwise sharing - publication figure"
+output: html_document
+date: "2026-05-07"
+---
+
+```{r setup}
+library(tidyverse)
+library(mashr)
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+```
+
+# Compute eQTL pairwise sharing
+
+```{r compute-eqtl-sharing}
+results_dir <- "/project/gilad/geena/publication_clean/results/mash/medianUMI1/"
+foldchange <- 3
+sharing_file <- paste0(results_dir, "pairwise_sharing_fc", foldchange, ".tsv")
+
+if (!file.exists(sharing_file)) {
+  m2 <- readRDS(paste0(results_dir, "m2.rds"))
+  f <- 1 / foldchange
+
+  cat("Computing pairwise sharing...\n")
+  pairwise_sharing <- get_pairwise_sharing(m2, factor = f, lfsr_thresh = 0.05)
+  write_tsv(as.data.frame(pairwise_sharing), sharing_file)
+  cat("Saved to", sharing_file, "\n")
+} else {
+  cat("eQTL sharing file already exists, skipping computation.\n")
+}
+```
+
+# Compute expression similarity matrix
+
+```{r compute-expression-similarity}
+expr_dir <- file.path(results_dir, "expression_matrix")
+if (!dir.exists(expr_dir)) dir.create(expr_dir, recursive = TRUE)
+r2_file <- file.path(expr_dir, "expr_cor_r2_common.csv")
+
+if (!file.exists(r2_file)) {
+  treatment_dir <- "/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/pseudobulk_15cells_20indiv_summary/normalized_celltypes_medianUMI1/logcpm"
+  control_dir   <- "/project/gilad/geena/publication_clean/matrixeqtl_input/control/pseudobulk_15cells_1indiv_summary/normalized_celltypes_medianUMI1/logcpm"
+
+  treatments <- c("Ale", "Bri", "Cer", "Cri", "Lor")
+  all_conditions <- c(treatments, "Control")
+
+  # Get cell type list from the eQTL sharing matrix
+  sharing_tmp <- read_tsv(sharing_file) %>% as.matrix()
+  clean_tmp <- gsub("_formash\\.out$", "", colnames(sharing_tmp))
+  celltypes <- unique(gsub("_", " ", sub("_(Control|Ale|Bri|Cer|Cri|Lor)$", "", clean_tmp)))
+
+  read_and_average <- function(file_path, cond) {
+    mat <- read.table(file_path, header = TRUE, row.names = 1, check.names = FALSE)
+    if (cond == "Control") {
+      return(rowMeans(as.matrix(mat), na.rm = TRUE))
+    }
+    cols <- grep(paste0("_", cond, "$"), colnames(mat), value = TRUE)
+    if (length(cols) == 0) return(NULL)
+    rowMeans(as.matrix(mat[, cols, drop = FALSE]), na.rm = TRUE)
+  }
+
+  expr_list <- list()
+  gene_lists <- list()
+
+  for (celltype in celltypes) {
+    for (cond in all_conditions) {
+      dir_path <- ifelse(cond == "Control", control_dir, treatment_dir)
+      filename <- paste0(celltype, "_all_postqc_tmm_logcpm.txt")
+      file_path <- file.path(dir_path, filename)
+
+      if (file.exists(file_path)) {
+        expr_vec <- read_and_average(file_path, cond)
+        if (!is.null(expr_vec)) {
+          cond_name <- paste0(celltype, "_", cond)
+          expr_list[[cond_name]] <- expr_vec
+          gene_lists[[cond_name]] <- names(expr_vec)
+        }
+      } else {
+        warning(paste("Missing:", file_path))
+      }
+    }
+  }
+
+  common_genes <- Reduce(intersect, gene_lists)
+  expr_matrix <- do.call(cbind, lapply(expr_list, function(x) x[common_genes]))
+  cat("Expression matrix:", nrow(expr_matrix), "genes x", ncol(expr_matrix), "conditions\n")
+
+  write.csv(expr_matrix, file.path(expr_dir, "expr_matrix.csv"))
+
+  expr_cor <- cor(expr_matrix, method = "pearson", use = "pairwise.complete.obs")
+  expr_cor_r2 <- expr_cor^2
+
+  write.csv(expr_cor, file.path(expr_dir, "expr_cor.csv"))
+  write.csv(expr_cor_r2, r2_file)
+  cat("Saved to", r2_file, "\n")
+} else {
+  cat("Expression r2 file already exists, skipping computation.\n")
+}
+```
+
+# Shared setup
+
+```{r shared-setup}
+results_dir <- "/project/gilad/geena/publication_clean/results/mash/medianUMI1/"
+expr_dir <- file.path(results_dir, "expression_matrix")
+plots_dir <- file.path(results_dir, "plots")
+if (!dir.exists(plots_dir)) dir.create(plots_dir, recursive = TRUE)
+
+# Germ layer definitions 
+ectoderm <- gsub(" ", "_", c("Adrenocortical cells", "CNS glia", "CNS neurons", "Neuroendocrine cells", "PNS glia", "PNS neurons", "Photoreceptor cells", "Retinal pigment cells", "Horizontal cells", "Lens fibre cells", "Unipolar brush cells", "Chromaffin cells", "Retinal progenitors and Muller glia", "Ganglion cells", "Amacrine cells", "Bipolar cells", "ENS glia", "Purkinje neurons", "Schwann cells", "Inhibitory neurons", "Astrocytes", "Granule neurons", "Oligodendrocytes", "Sympathoblasts", "Visceral neurons", "Inhibitory interneurons", "Microglia", "Limbic system neurons", "ENS neurons", "Excitatory neurons", "Glioblast", "Neuroblast", "Neuron", "Neuronal_IPC", "Oligo", "Radial_glia", "Retinal_neurons"))
+mesoderm <- gsub(" ", "_", c("Early mesoderm cells", "Cardiac mesoderm cells", "Cardiac progenitor cells", "Cardiomyocytes", "Epicardial fat cells", "Endocardial cells", "Mesangial cells", "Smooth muscle cells", "Vascular endothelial cells", "Mesothelial cells", "Stromal cells", "Fibroblast", "Metanephric cells", "Ureteric bud cells", "Lymphatic endothelial cells", "Lymphoid cells", "Erythroblasts", "Megakaryocytes", "Hematopoietic stem cells", "Myeloid cells", "Antigen presenting cells", "Thymocytes", "Satellite cells", "Skeletal muscle cells"))
+endoderm <- gsub(" ", "_", c("Hepatoblasts", "Stellate cells", "Parietal and chief cells", "Acinar cells", "Ductal cells", "Islet endocrine cells"))
+epithelium <- gsub(" ", "_", c("Goblet cells", "Neuroepithelial cells", "Ciliated epithelial cells", "Intestinal epithelial cells", "Squamous epithelial cells", "Bronchiolar and alveolar epithelial cells"))
+
+# Shared color palettes
+treatment_colors <- c(
+  Ale = "pink", Bri = "skyblue", Cer = "orange",
+  Cri = "green", Lor = "purple", Control = "yellow"
+)
+
+germ_layer_colors <- c(
+  Ectoderm = "#8dd3c7", Mesoderm = "#ffffb3",
+  Endoderm = "#bebada", Epithelium = "#fb8072", Other = "gray80"
+)
+
+# Helper to build annotations data.frame
+build_annotations <- function(condition_names) {
+  ann <- data.frame(
+    Treatment = sub(".*_", "", condition_names),
+    CellType = gsub(" ", "_", sub("_(Control|Ale|Bri|Cer|Cri|Lor)$", "", condition_names)),
+    row.names = condition_names
+  )
+  ann$GermLayer <- case_when(
+    ann$CellType %in% ectoderm ~ "Ectoderm",
+    ann$CellType %in% mesoderm ~ "Mesoderm",
+    ann$CellType %in% endoderm ~ "Endoderm",
+    ann$CellType %in% epithelium ~ "Epithelium",
+    TRUE ~ "Other"
+  )
+  ann
+}
+
+# Celltype colors (union of both panels)
+# We compute this once so both panels use the same palette
+all_celltypes_union <- sort(unique(c(
+  gsub(" ", "_", sub("_(Control|Ale|Bri|Cer|Cri|Lor)$", "", gsub("_formash\\.out$", "", colnames(
+    read_tsv(paste0(results_dir, "pairwise_sharing_fc3.tsv")) %>% as.matrix()
+  )))),
+  gsub(" ", "_", sub("_(Control|Ale|Bri|Cer|Cri|Lor)$", "", colnames(
+    read_csv(file.path(expr_dir, "expr_cor_r2_common.csv")) %>%
+      column_to_rownames(var = colnames(.)[1]) %>% as.matrix()
+  )))
+)))
+n_celltypes_all <- length(all_celltypes_union)
+celltype_palette_all <- colorRampPalette(brewer.pal(8, "Set2"))(n_celltypes_all)
+celltype_colors_all <- setNames(celltype_palette_all, all_celltypes_union)
+```
+
+# Load data
+
+```{r load-data}
+# eQTL sharing matrix
+foldchange <- 3
+pairwise_sharing <- read_tsv(paste0(results_dir, "pairwise_sharing_fc", foldchange, ".tsv")) %>% as.matrix()
+clean_names <- gsub("_formash\\.out$", "", colnames(pairwise_sharing))
+colnames(pairwise_sharing) <- clean_names
+rownames(pairwise_sharing) <- clean_names
+
+# Expression r2 matrix
+expr_cor_r2 <- read_csv(file.path(expr_dir, "expr_cor_r2_common.csv")) %>%
+  column_to_rownames(var = colnames(.)[1]) %>%
+  as.matrix()
+
+# Build annotations
+ann_expr <- build_annotations(colnames(expr_cor_r2))
+ann_eqtl <- build_annotations(colnames(pairwise_sharing))
+```
+
+# Combined figure
+
+```{r combined-figure, fig.width=16, fig.height=10}
+# Annotation bars
+ha_expr <- HeatmapAnnotation(
+  Treatment = ann_expr$Treatment,
+  `Cell type` = ann_expr$CellType,
+  `Germ layer` = ann_expr$GermLayer,
+  col = list(
+    Treatment = treatment_colors,
+    `Cell type` = celltype_colors_all[unique(ann_expr$CellType)],
+    `Germ layer` = germ_layer_colors
+  ),
+  which = "column",
+  show_annotation_name = TRUE,
+  annotation_name_gp = gpar(fontsize = 10),
+  show_legend = FALSE
+)
+
+ha_eqtl <- HeatmapAnnotation(
+  Treatment = ann_eqtl$Treatment,
+  `Cell type` = ann_eqtl$CellType,
+  `Germ layer` = ann_eqtl$GermLayer,
+  col = list(
+    Treatment = treatment_colors,
+    `Cell type` = celltype_colors_all[unique(ann_eqtl$CellType)],
+    `Germ layer` = germ_layer_colors
+  ),
+  which = "column",
+  show_annotation_name = TRUE,
+  annotation_name_gp = gpar(fontsize = 10),
+  show_legend = FALSE
+)
+
+# Color scales
+col_expr <- colorRamp2(c(0, 0.5, 1), c("#FFFFFF", "#FDAE6B", "#D94701"))
+col_eqtl <- colorRamp2(c(0, 0.5, 1), c("#FFFFFF", "#9ECAE1", "#08519C"))
+
+# Row labels: full condition (CellType - Treatment)
+row_labels_expr <- paste0(gsub("_", " ", ann_expr$CellType), " - ", ann_expr$Treatment)
+row_labels_eqtl <- paste0(gsub("_", " ", ann_eqtl$CellType), " - ", ann_eqtl$Treatment)
+
+# Heatmap objects
+# Each heatmap shows its own color scale legend on the right.
+# Annotation legends are suppressed (shown once below).
+ht_expr <- Heatmap(
+  expr_cor_r2,
+  name = "r\u00b2",
+  col = col_expr,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  top_annotation = ha_expr,
+  column_title = "Expression similarity",
+  column_title_gp = gpar(fontsize = 14, fontface = "bold"),
+  column_dend_height = unit(3, "cm"),
+  row_dend_width = unit(2, "cm"),
+  show_heatmap_legend = TRUE,
+  heatmap_legend_param = list(
+    title = "r\u00b2",
+    at = c(0, 0.25, 0.5, 0.75, 1),
+    title_gp = gpar(fontsize = 14, fontface = "bold"),
+    labels_gp = gpar(fontsize = 12)
+  )
+)
+
+ht_eqtl <- Heatmap(
+  pairwise_sharing,
+  name = "Sharing",
+  col = col_eqtl,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  top_annotation = ha_eqtl,
+  column_title = "eQTL sharing",
+  column_title_gp = gpar(fontsize = 14, fontface = "bold"),
+  column_dend_height = unit(3, "cm"),
+  row_dend_width = unit(2, "cm"),
+  show_heatmap_legend = TRUE,
+  heatmap_legend_param = list(
+    title = "Sharing",
+    at = c(0, 0.25, 0.5, 0.75, 1),
+    title_gp = gpar(fontsize = 14, fontface = "bold"),
+    labels_gp = gpar(fontsize = 12)
+  )
+)
+
+# Capture heatmaps as grobs (with color scale legends on right)
+grob_expr <- grid.grabExpr(draw(ht_expr,
+  heatmap_legend_side = "right",
+  padding = unit(c(2, 2, 2, 15), "mm")))
+grob_eqtl <- grid.grabExpr(draw(ht_eqtl,
+  heatmap_legend_side = "right",
+  padding = unit(c(2, 2, 2, 15), "mm")))
+
+# Shared annotation legends (below both panels)
+lgd_treatment <- Legend(
+  title = "Treatment",
+  labels = names(treatment_colors),
+  legend_gp = gpar(fill = treatment_colors),
+  title_gp = gpar(fontsize = 14, fontface = "bold"),
+  labels_gp = gpar(fontsize = 12),
+  nrow = 1
+)
+
+lgd_celltype <- Legend(
+  title = "Cell type",
+  labels = gsub("_", " ", names(celltype_colors_all)),
+  legend_gp = gpar(fill = celltype_colors_all),
+  title_gp = gpar(fontsize = 14, fontface = "bold"),
+  labels_gp = gpar(fontsize = 12),
+  nrow = 3
+)
+
+lgd_germ <- Legend(
+  title = "Germ layer",
+  labels = names(germ_layer_colors),
+  legend_gp = gpar(fill = germ_layer_colors),
+  title_gp = gpar(fontsize = 14, fontface = "bold"),
+  labels_gp = gpar(fontsize = 12),
+  nrow = 1
+)
+
+# Treatment and Germ layer side by side, Cell type below
+lgd_top_row <- packLegend(
+  lgd_treatment, lgd_germ,
+  direction = "horizontal",
+  gap = unit(10, "mm")
+)
+
+legend_grob <- packLegend(
+  lgd_top_row, lgd_celltype,
+  direction = "vertical",
+  gap = unit(4, "mm")
+)
+
+# --- Assemble: two heatmaps on top, shared annotation legend below ---
+draw_fig <- function() {
+  pushViewport(viewport(layout = grid.layout(
+    nrow = 2, ncol = 2,
+    widths = unit(c(1, 1), "null"),
+    heights = unit(c(5, 1.5), "null")
+  )))
+
+  # Panel A — eQTL sharing
+  pushViewport(viewport(layout.pos.row = 1, layout.pos.col = 1))
+  grid.draw(grob_eqtl)
+  grid.text("A", x = unit(0.02, "npc"), y = unit(0.98, "npc"),
+            gp = gpar(fontsize = 18, fontface = "bold"))
+  popViewport()
+
+  # Panel B — Expression similarity
+  pushViewport(viewport(layout.pos.row = 1, layout.pos.col = 2))
+  grid.draw(grob_expr)
+  grid.text("B", x = unit(0.02, "npc"), y = unit(0.98, "npc"),
+            gp = gpar(fontsize = 18, fontface = "bold"))
+  popViewport()
+
+  # Shared annotation legend below, centered
+  pushViewport(viewport(layout.pos.row = 2, layout.pos.col = 1:2))
+  pushViewport(viewport(x = 0.5, y = 0.5, just = "centre"))
+  grid.draw(legend_grob)
+  popViewport(2)
+
+  popViewport()
+}
+
+pdf(file.path(plots_dir, "fig3_expression_eqtl_sharing.pdf"), width = 20, height = 12)
+draw_fig()
+dev.off()
+
+draw_fig()
+```
+
+# Dendrogram-only figure (main Figure 3)
+
+Same clusterings and annotation tracks as the heatmap version, but the matrix
+body is suppressed so the trees are the focus. Reuses `ha_eqtl`, `ha_expr`, and
+`legend_grob` built in the prior chunk.
+
+```{r dendrograms-only, fig.width=14, fig.height=5.5}
+# Precompute clusterings on the full (symmetric) matrices so the trees are
+# identical to those in the heatmap version above.
+col_dend_eqtl <- as.dendrogram(hclust(dist(t(pairwise_sharing))))
+col_dend_expr <- as.dendrogram(hclust(dist(t(expr_cor_r2))))
+
+# Stub matrices keep the heatmap body to a single (invisible) row of cells.
+mat_stub_eqtl <- matrix(NA_real_, nrow = 1, ncol = ncol(pairwise_sharing))
+colnames(mat_stub_eqtl) <- colnames(pairwise_sharing)
+mat_stub_expr <- matrix(NA_real_, nrow = 1, ncol = ncol(expr_cor_r2))
+colnames(mat_stub_expr) <- colnames(expr_cor_r2)
+
+# Dendrogram-specific annotation objects with thicker strips than the heatmap
+# version uses — the strips carry the narrative here so they get more weight.
+ha_expr_dend <- HeatmapAnnotation(
+  Treatment = ann_expr$Treatment,
+  `Cell type` = ann_expr$CellType,
+  `Germ layer` = ann_expr$GermLayer,
+  col = list(
+    Treatment = treatment_colors,
+    `Cell type` = celltype_colors_all[unique(ann_expr$CellType)],
+    `Germ layer` = germ_layer_colors
+  ),
+  which = "column",
+  show_annotation_name = TRUE,
+  annotation_name_gp = gpar(fontsize = 10),
+  simple_anno_size = unit(8, "mm"),
+  show_legend = FALSE
+)
+ha_eqtl_dend <- HeatmapAnnotation(
+  Treatment = ann_eqtl$Treatment,
+  `Cell type` = ann_eqtl$CellType,
+  `Germ layer` = ann_eqtl$GermLayer,
+  col = list(
+    Treatment = treatment_colors,
+    `Cell type` = celltype_colors_all[unique(ann_eqtl$CellType)],
+    `Germ layer` = germ_layer_colors
+  ),
+  which = "column",
+  show_annotation_name = TRUE,
+  annotation_name_gp = gpar(fontsize = 10),
+  simple_anno_size = unit(8, "mm"),
+  show_legend = FALSE
+)
+
+ht_eqtl_dend <- Heatmap(
+  mat_stub_eqtl,
+  rect_gp = gpar(col = NA, fill = NA),
+  na_col = "white",
+  show_heatmap_legend = FALSE,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  cluster_rows = FALSE,
+  cluster_columns = col_dend_eqtl,
+  top_annotation = ha_eqtl_dend,
+  column_dend_height = unit(5, "cm"),
+  column_title = "eQTL sharing",
+  column_title_gp = gpar(fontsize = 14, fontface = "bold")
+)
+
+ht_expr_dend <- Heatmap(
+  mat_stub_expr,
+  rect_gp = gpar(col = NA, fill = NA),
+  na_col = "white",
+  show_heatmap_legend = FALSE,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  cluster_rows = FALSE,
+  cluster_columns = col_dend_expr,
+  top_annotation = ha_expr_dend,
+  column_dend_height = unit(5, "cm"),
+  column_title = "Expression similarity",
+  column_title_gp = gpar(fontsize = 14, fontface = "bold")
+)
+
+grob_eqtl_dend <- grid.grabExpr(draw(ht_eqtl_dend,
+  padding = unit(c(2, 2, 2, 5), "mm")))
+grob_expr_dend <- grid.grabExpr(draw(ht_expr_dend,
+  padding = unit(c(2, 2, 2, 5), "mm")))
+
+draw_dend_fig <- function() {
+  pushViewport(viewport(layout = grid.layout(
+    nrow = 2, ncol = 2,
+    widths = unit(c(1, 1), "null"),
+    heights = unit(c(3, 1.5), "null")
+  )))
+
+  # Panel A — eQTL sharing dendrogram
+  pushViewport(viewport(layout.pos.row = 1, layout.pos.col = 1))
+  grid.draw(grob_eqtl_dend)
+  grid.text("A", x = unit(0.02, "npc"), y = unit(0.98, "npc"),
+            gp = gpar(fontsize = 18, fontface = "bold"))
+  popViewport()
+
+  # Panel B — Expression similarity dendrogram
+  pushViewport(viewport(layout.pos.row = 1, layout.pos.col = 2))
+  grid.draw(grob_expr_dend)
+  grid.text("B", x = unit(0.02, "npc"), y = unit(0.98, "npc"),
+            gp = gpar(fontsize = 18, fontface = "bold"))
+  popViewport()
+
+  # Shared annotation legend below, centered
+  pushViewport(viewport(layout.pos.row = 2, layout.pos.col = 1:2))
+  pushViewport(viewport(x = 0.5, y = 0.5, just = "centre"))
+  grid.draw(legend_grob)
+  popViewport(2)
+
+  popViewport()
+}
+
+pdf(file.path(plots_dir, "fig3_dendrograms_only.pdf"), width = 14, height = 5.5)
+draw_dend_fig()
+dev.off()
+
+draw_dend_fig()
+```
+

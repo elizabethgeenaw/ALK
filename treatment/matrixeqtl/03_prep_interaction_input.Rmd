@@ -1,0 +1,264 @@
+---
+title: "Interaction eQTL input prep: combined expression and covariates"
+output: html_document
+date: '2025-07-28'
+---
+
+**Must be run on midway-l16b-31 (R/4.2.0).** PCAForQTL (runElbow, filterKnownCovariates)
+is not compatible with R/4.4.1.
+
+Prepare combined treatment + control pseudobulk expression and covariate files for
+genotype × treatment interaction mapping with MatrixEQTL (modelLINEAR_CROSS).
+Produces two medianUMI threshold versions: medianUMI1 (matching the main eQTL
+gene set) and medianUMI10 (robustness check). Each version outputs one combined
+expression file per cell type (all 5 treatments + control as columns) and one
+covariate file per cell type (expression PCs + sex + treatment indicator as last row).
+
+```{r setup}
+library(edgeR)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(PCAForQTL)
+library(CelliD)   # for HgProteinCodingGenes
+
+# Paths
+treatment_pb_dir <- "/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/pseudobulk_15cells_20indiv_summary/"
+control_pb_dir   <- "/project/gilad/geena/publication_clean/matrixeqtl_input/control/pseudobulk_15cells_1indiv_summary/"
+sex_file         <- "/project/gilad/geena/publication_clean/reference_sets/ALK_sex.csv"
+valid_ct_file    <- paste0(treatment_pb_dir, "valid_celltypes_20indiv.tsv")
+interaction_dir  <- "/project/gilad/geena/publication_clean/matrixeqtl_input/interaction/"
+
+treatments    <- c("Ale", "Bri", "Cer", "Cri", "Lor")
+control_subsets <- 1:10
+
+# Sex lookup: line number -> full ID -> sex
+sex_df <- read_csv(sex_file, show_col_types = FALSE)
+sex_df$individual <- paste0("NA", sex_df$line)
+
+# Valid cell types from the main treatment eQTL analysis (21 cell types)
+valid_celltypes_treatment <- read_tsv(valid_ct_file, show_col_types = FALSE)$celltypes
+```
+
+# Load pseudobulk data
+
+```{r load-pseudobulk}
+scale_this <- function(x) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
+
+# Load one treatment pseudobulk and suffix column names with the drug code
+load_treatment_pb <- function(drug) {
+  pb <- readRDS(paste0(treatment_pb_dir, "pseudo_bulk_", drug, ".rds"))
+  lapply(pb, function(mat) {
+    colnames(mat) <- paste0(colnames(mat), "_", drug)
+    mat
+  })
+}
+
+# Load all 10 control subsets and merge: cbind per cell type, suffix with _Control
+load_control_pb <- function() {
+  subsets <- lapply(control_subsets, function(i) {
+    pb <- readRDS(paste0(control_pb_dir, "pseudo_bulk_subset", i, ".rds"))
+    lapply(pb, function(mat) {
+      colnames(mat) <- paste0(colnames(mat), "_Control")
+      mat
+    })
+  })
+  all_ct <- unique(unlist(lapply(subsets, names)))
+  merged <- setNames(lapply(all_ct, function(ct) {
+    mats <- Filter(Negate(is.null), lapply(subsets, `[[`, ct))
+    if (length(mats) == 0) return(NULL)
+    shared_genes <- Reduce(intersect, lapply(mats, rownames))
+    do.call(cbind, lapply(mats, function(m) m[shared_genes, , drop = FALSE]))
+  }), all_ct)
+  Filter(Negate(is.null), merged)
+}
+
+message("Loading treatment pseudobulk...")
+pb_treat <- setNames(lapply(treatments, load_treatment_pb), treatments)
+
+message("Loading and merging control pseudobulk subsets...")
+pb_ctrl <- load_control_pb()
+
+# Cell types available in both treatment and control
+valid_celltypes_control <- names(pb_ctrl)
+valid_celltypes <- intersect(valid_celltypes_treatment, valid_celltypes_control)
+message("Cell types in both treatment and control: ", length(valid_celltypes))
+print(valid_celltypes)
+```
+
+# Shared helper: combine + normalize + INT
+
+```{r helpers}
+# Inverse normal transform: scale then rank-based quantile normalize per gene
+inv_norm_transform <- function(logcpm_df) {
+  logcpm_df %>%
+    rownames_to_column("ID") %>%
+    pivot_longer(-ID, names_to = "SampleName", values_to = "value") %>%
+    group_by(ID) %>%
+    mutate(scaled = scale_this(value)) %>%
+    ungroup() %>%
+    group_by(SampleName) %>%
+    mutate(pct = rank(scaled, ties.method = "average") / (n() + 1),
+           int = qnorm(pct)) %>%
+    ungroup() %>%
+    dplyr::select(ID, SampleName, int) %>%
+    pivot_wider(names_from = SampleName, values_from = int) %>%
+    column_to_rownames("ID")
+}
+
+# Combine matrices for a single cell type across all conditions (shared genes)
+combine_mats <- function(ct) {
+  mats <- c(lapply(pb_treat, `[[`, ct), list(Control = pb_ctrl[[ct]]))
+  mats <- Filter(Negate(is.null), mats)
+  shared_genes <- Reduce(intersect, lapply(mats, rownames))
+  do.call(cbind, lapply(mats, function(m) m[shared_genes, , drop = FALSE]))
+}
+
+# Get per-condition column indices for a sample name vector
+condition_idx <- function(sample_ids, condition) {
+  grepl(paste0("_", condition, "$"), sample_ids)
+}
+
+# Per-condition medianUMI ≥ threshold filter: keep genes passing in ALL conditions
+filter_per_condition <- function(combined_mat, conditions, threshold) {
+  keep <- Reduce(`&`, lapply(conditions, function(cond) {
+    idx <- condition_idx(colnames(combined_mat), cond)
+    if (!any(idx)) return(rep(TRUE, nrow(combined_mat)))
+    apply(combined_mat[, idx, drop = FALSE], 1, median) >= threshold
+  }))
+  keep
+}
+```
+
+# Process each cell type for both medianUMI thresholds
+
+```{r process}
+process_celltype <- function(ct, median_umi_threshold, per_condition_filter) {
+  message("  Processing: ", ct, " (medianUMI>=", median_umi_threshold, ")")
+
+  combined_mat <- combine_mats(ct)
+  combined_mat <- combined_mat[, colSums(combined_mat) > 0, drop = FALSE]
+  if (ncol(combined_mat) < 2) {
+    message("  Skipping ", ct, ": insufficient samples")
+    return(invisible(NULL))
+  }
+
+  # Restrict to protein-coding genes
+  dge <- DGEList(counts = combined_mat[rownames(combined_mat) %in% HgProteinCodingGenes, ])
+  if (nrow(dge) == 0) { message("  No protein-coding genes for ", ct); return(invisible(NULL)) }
+
+  # Gene filtering
+  if (per_condition_filter) {
+    all_conds <- c(treatments, "Control")
+    keep <- filter_per_condition(dge$counts, all_conds, median_umi_threshold)
+  } else {
+    keep <- apply(dge$counts, 1, median) >= median_umi_threshold
+  }
+  keep <- keep & (apply(dge$counts, 1, var) > 0)
+  dge <- dge[keep, , keep.lib.sizes = FALSE]
+  if (nrow(dge) == 0) { message("  No genes passed filter for ", ct); return(invisible(NULL)) }
+  message("    Genes after filter: ", nrow(dge))
+
+  # TMM + logCPM on combined matrix
+  dge <- edgeR::calcNormFactors(dge, method = "TMM")
+  logcpm <- as.data.frame(edgeR::cpm(dge, log = TRUE, normalized.lib.sizes = TRUE))
+
+  # Inverse normal transform across all samples per gene
+  logcpm_int <- inv_norm_transform(logcpm)
+
+  # Save expression file
+  out_file <- file.path(out_expr_dir, paste0(ct, "_all_postqc_tmm_logcpm_int.txt"))
+  write.table(cbind(id = rownames(logcpm_int), logcpm_int),
+              out_file, row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+  message("    Saved expression: ", out_file)
+}
+
+
+# Run for medianUMI1 (per-condition filter) and medianUMI10 (combined filter)
+for (umi_thresh in c(1, 10)) {
+  per_cond <- (umi_thresh == 1)
+  out_expr_dir <- file.path(interaction_dir, paste0("medianUMI", umi_thresh))
+  dir.create(out_expr_dir, recursive = TRUE, showWarnings = FALSE)
+
+  message("\n=== medianUMI >= ", umi_thresh,
+          if (per_cond) " (per-condition filter)" else " (combined filter)",
+          " ===")
+  for (ct in valid_celltypes) {
+    process_celltype(ct, umi_thresh, per_cond)
+  }
+}
+```
+
+# Build covariate files
+
+One covariate file per (cell type × medianUMI version). PCA on ALL samples in the
+combined expression matrix. Treatment indicator (0 = Control, 1 = any treatment)
+is added as the final row. PCs correlated with the treatment indicator (R² > 0.9)
+are removed to avoid multicollinearity.
+
+```{r covariates}
+make_covariates <- function(ct, expr_dir, cov_dir) {
+  expr_file <- file.path(expr_dir, paste0(ct, "_all_postqc_tmm_logcpm_int.txt"))
+  if (!file.exists(expr_file)) return(invisible(NULL))
+
+  exp <- read.table(expr_file, header = TRUE, row.names = 1, sep = "\t", check.names = FALSE)
+  sample_ids <- colnames(exp)
+
+  # PCA (samples × genes)
+  prc <- prcomp(t(as.matrix(exp)), center = TRUE, scale. = TRUE)
+
+  # Elbow method to select K
+  K <- runElbow(prcompResult = prc)
+  PCs_top <- scale(prc$x[, 1:K, drop = FALSE])
+
+  # Treatment indicator (0 = Control, 1 = treatment)
+  treat_vec <- as.numeric(!grepl("_Control$", sample_ids))
+
+  # Remove PCs with R² > 0.9 vs treatment indicator (avoids multicollinearity)
+  r2_treat <- apply(PCs_top, 2, function(pc) summary(lm(pc ~ treat_vec))$r.squared)
+  PCs_top <- PCs_top[, r2_treat <= 0.9, drop = FALSE]
+  if (ncol(PCs_top) == 0) {
+    warning("All PCs correlated with treatment for ", ct, "; using PC1 only")
+    PCs_top <- scale(prc$x[, 1, drop = FALSE])
+  }
+
+  # Sex: match individual ID (strip condition suffix) to sex lookup
+  indiv_ids <- sub("_[^_]+$", "", sample_ids)
+  sex_vec <- sex_df$sex[match(indiv_ids, sex_df$individual)]
+  sex_bin <- ifelse(sex_vec == "M", 1, 0)
+  knownCov <- data.frame(sex = sex_bin, row.names = sample_ids)
+
+  # Filter sex if already captured by PCs (R² > 0.9)
+  filteredCov <- filterKnownCovariates(knownCov, PCs_top, unadjustedR2_cutoff = 0.9)
+
+  # Assemble final covariate matrix (samples × covariates), then transpose for MatrixEQTL
+  cov_mat <- if (ncol(as.data.frame(filteredCov)) > 0) {
+    cbind(PCs_top, sex = as.matrix(as.data.frame(filteredCov)))
+  } else {
+    PCs_top
+  }
+  cov_mat_t <- t(cov_mat)  # covariates × samples
+
+  # Add treatment indicator as last row
+  cov_mat_t <- rbind(cov_mat_t, treatment = treat_vec)
+
+  # Save
+  K_used <- ncol(PCs_top)
+  out_file <- file.path(cov_dir, paste0(ct, "_", K_used, "phenoPC.txt"))
+  write.table(cbind(id = rownames(cov_mat_t), cov_mat_t),
+              out_file, row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+  message("  Saved covariates: ", out_file)
+}
+
+for (umi_thresh in c(1, 10)) {
+  expr_dir <- file.path(interaction_dir, paste0("medianUMI", umi_thresh))
+  cov_dir  <- file.path(expr_dir, "cov_elbow")
+  dir.create(cov_dir, recursive = TRUE, showWarnings = FALSE)
+
+  message("\n=== Covariates for medianUMI", umi_thresh, " ===")
+  available_cts <- sub("_all_postqc_tmm_logcpm_int.txt$", "",
+                       list.files(expr_dir, pattern = "_all_postqc_tmm_logcpm_int.txt"))
+  for (ct in available_cts) make_covariates(ct, expr_dir, cov_dir)
+}
+```

@@ -1,0 +1,566 @@
+---
+title: "Response eQTL Supplementary Tables — Context-Specific Regulatory Effects"
+author: "Elizabeth Geena Woo"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: show
+    theme: flatly
+---
+
+<!--
+  PURPOSE
+  Produces the four response-eQTL supplementary tables for the manuscript:
+    S18  reQTL_full_list                     (full annotated response eQTL table)
+    S19  reQTL_condition_specific            (loci in exactly one celltype x treatment)
+    S21  table1_anchored                     (loci joined to Table 1 clinical AEs)
+    S22  reQTL_within_celltype_drug_specific (loci drug-specific within a cell type)
+
+  INPUT
+    results/mash/medianUMI1/lfc3/supp_table_response_eqtls.tsv
+      39,097 rows, pre-filtered response eQTL calls.
+    code/mash/Table1_adverse_events_long.csv
+      Manuscript Table 1: drug x adverse_event x cell_type (106 data rows).
+
+  OUTPUT ROOT
+    results/mash/medianUMI1/lfc3/supp_subsets/outputs/<name>.{csv,xlsx}
+
+  Run: rmarkdown::render("supp_S18_S19_S21_S22_reQTL_subsets.Rmd")
+  On gilad-hm (R 4.4.1): module load R/4.4.1, then Rscript -e 'rmarkdown::render(...)'
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Output file index
+
+All files are written to `results/mash/medianUMI1/lfc3/supp_subsets/outputs/` as paired `.csv` + `.xlsx`.
+
+| File | Manuscript label | Rows | Definition |
+|------|------------------|------|------------|
+| `SX_full_response_eqtl_annotated`  | S18 | 39,097 rows              | Full annotated response eQTL table (all pre-filtered calls with specificity flags) |
+| `subset_condition_specific`        | S19 | 523 unique loci          | Loci detected in exactly one (celltype x treatment) pair globally |
+| `S_table1_anchored`                | S21 | many-to-many with Table 1 | Response eQTLs in cell types matched to Table 1 adverse events, with clinical context columns attached |
+| `subset_within_celltype_drug_specific` | S22 | 1,391 unique loci    | Loci that are response eQTLs for exactly one drug within a given cell type |
+
+`SX_full_response_eqtl_annotated` is the master table. `subset_condition_specific` and `subset_within_celltype_drug_specific` are row-filters of it. `S_table1_anchored` is an inner join of it with the Table 1 clinical crosswalk.
+
+# Setup
+
+## Libraries and paths
+
+```{r setup-libraries}
+library(tidyverse)   # dplyr, readr, stringr, tidyr, purrr
+library(openxlsx)    # write.xlsx() — single-sheet XLSX files
+library(knitr)       # kable() for HTML display tables
+```
+
+```{r setup-paths}
+results_dir <- "/project/gilad/geena/publication_clean/results/mash/medianUMI1"
+lfc3_dir    <- file.path(results_dir, "lfc3")
+code_dir    <- "/project/gilad/geena/publication_clean/code/mash"
+out_dir     <- file.path(lfc3_dir, "supp_subsets")
+tsv_dir     <- file.path(out_dir, "outputs")
+
+# Create output directories (safe to call multiple times)
+dir.create(tsv_dir, showWarnings = FALSE, recursive = TRUE)
+cat("Output directory:", tsv_dir, "\n")
+```
+
+## write_both helper
+
+```{r helper-write-both}
+# write_both: write a data frame as both CSV and single-sheet XLSX.
+
+write_both <- function(df, name, dir = tsv_dir) {
+  readr::write_csv(df, file.path(dir, paste0(name, ".csv")))
+  openxlsx::write.xlsx(as.data.frame(df),
+                       file.path(dir, paste0(name, ".xlsx")),
+                       overwrite = TRUE)
+  cat("  wrote:", name, "(", nrow(df), "rows )\n")
+}
+```
+
+# Load source data
+
+```{r load-data}
+# Source file: supp_table_response_eqtls.tsv
+# 39,097 rows: all pre-filtered response eQTL calls, each row is a response eQTL x treatment x cell type combination
+# Columns: gene, snp, gene_snp, celltype, treatment, beta_treat, sd_treat,
+#          lfsr_treat, beta_control, sd_control, lfsr_control, fold_change
+#
+#   beta_treat and beta_control are posterior effect sizes in units of
+#   inverse-normal logCPM per ALT allele copy (dosage 0/1/2 of ALT).
+#   Sources: find_specific_eqtl_examples.R:378-385, .Rmd:435,
+#            2_matrixeqtl_treatment.R:108 (rowMeans/2 = ALT freq)
+#
+# fold_change = abs(beta_treat) / abs(beta_control)
+#   Source: post_mash_analysis_v2.Rmd line 1027
+#
+# Response eQTL definition:
+#   (lfsr_treat < 0.05 OR lfsr_control < 0.05)
+#   AND (fold_change >= 3 OR fold_change <= 1/3 OR sign_flip)
+df_raw <- read_tsv(
+  file.path(lfc3_dir, "supp_table_response_eqtls.tsv"),
+  col_types = cols(
+    gene         = col_character(),
+    snp          = col_character(),
+    gene_snp     = col_character(),
+    celltype     = col_character(),
+    treatment    = col_character(),
+    beta_treat   = col_double(),
+    sd_treat     = col_double(),
+    lfsr_treat   = col_double(),
+    beta_control = col_double(),
+    sd_control   = col_double(),
+    lfsr_control = col_double(),
+    fold_change  = col_double()
+  ),
+  show_col_types = FALSE
+)
+
+cat("Loaded:", nrow(df_raw), "rows,", ncol(df_raw), "columns\n")
+```
+
+
+
+```{r verify-derive-counts}
+# Global: unique gene_snp pairs (2137 unique SNP-gene pairs across all treatments and cell types)
+n_unique_loci <- n_distinct(df_raw$gene_snp)
+
+# Per-drug unique response eQTLs
+per_drug_loci <- df_raw %>%
+  group_by(treatment) %>%
+  summarise(n_loci = n_distinct(gene_snp), .groups = "drop") %>%
+  arrange(treatment)
+
+# How many drugs does a response eQTL show up for?
+drug_per_locus <- df_raw %>%
+  group_by(gene_snp) %>%
+  summarise(n_drugs = n_distinct(treatment), .groups = "drop")
+
+# Global drug-specific: gene_snp is a call in exactly one treatment
+n_global_specific_loci <- sum(drug_per_locus$n_drugs == 1)
+
+per_drug_global_specific <- df_raw %>%
+  inner_join(drug_per_locus %>% filter(n_drugs == 1), by = "gene_snp") %>%
+  group_by(treatment) %>%
+  summarise(n_loci = n_distinct(gene_snp), .groups = "drop") %>%
+  arrange(treatment)
+
+# Within a cell type, how many drugs is an eQTL treatment responsive for?
+wct_per_pair <- df_raw %>%
+  group_by(gene_snp, celltype) %>%
+  summarise(n_drugs_in_ct = n_distinct(treatment), .groups = "drop")
+
+# Within-cell-type drug-specific: per (gene_snp, celltype), call for exactly one drug (1391 total)
+n_within_ct_specific_loci <- df_raw %>%
+  inner_join(wct_per_pair %>% filter(n_drugs_in_ct == 1), by = c("gene_snp", "celltype")) %>%
+  pull(gene_snp) %>% n_distinct()
+
+per_drug_within_ct <- df_raw %>%
+  inner_join(wct_per_pair %>% filter(n_drugs_in_ct == 1), by = c("gene_snp", "celltype")) %>%
+  group_by(treatment) %>%
+  summarise(n_loci = n_distinct(gene_snp), .groups = "drop") %>%
+  arrange(treatment)
+
+# All-five-drug: response eQTL in all 5 treatments (any cell type) - 1097
+n_all_five <- sum(drug_per_locus$n_drugs == 5)
+
+# How many cell types is a response eQTL present in? (regardless of treatment)
+ct_per_locus <- df_raw %>%
+  group_by(gene_snp) %>%
+  summarise(n_celltypes = n_distinct(celltype), .groups = "drop")
+n_single_ct <- sum(ct_per_locus$n_celltypes == 1)
+
+# All-celltype: response eQTL in all 21 cell types
+n_all_ct <- sum(ct_per_locus$n_celltypes == 21)
+
+# All-five-within-celltype: gene_snp hasat least 1 cell type where it is treatment-responsive for all 5 drugs
+# Distinct from all_five_drug (which ignores cell type identity)
+# TRUE/FALSE flag for this
+all5_wct <- wct_per_pair %>%
+  group_by(gene_snp) %>%
+  summarise(all_five_within_celltype = any(n_drugs_in_ct == 5), .groups = "drop")
+n_all5_within <- sum(all5_wct$all_five_within_celltype) # 921
+
+# Condition-specific: gene_snp appears in exactly one (celltype × treatment) pair
+cond_per_locus <- df_raw %>%
+  group_by(gene_snp) %>%
+  summarise(n_conditions = n_distinct(paste(celltype, treatment)), .groups = "drop")
+n_condition_specific <- sum(cond_per_locus$n_conditions == 1) # 523
+```
+
+
+
+# Specificity flag computation
+
+All flags computed once here, then joined to the master table. Separating
+computation from joining makes each flag independently auditable.
+
+```{r compute-flags-per-locus}
+# Per-gene_snp flags
+locus_flags <- drug_per_locus %>%
+  # n_drugs: number of distinct treatments a gene_snp is a call in (any cell type)
+  left_join(ct_per_locus,   by = "gene_snp") %>%
+  # n_celltypes: distinct cell types across all treatments
+  left_join(cond_per_locus, by = "gene_snp") %>%
+  # n_conditions: distinct (celltype × treatment) pairs
+  # Note: all_five_within_celltype is NOT joined here — it is a per-(gene_snp, celltype)
+  # property (TRUE when n_drugs_in_ct == 5) and lives in wct_flags instead.
+  mutate(
+    # single_celltype: response eQTL in only one cell type (regardless of treatment)
+    single_celltype      = (n_celltypes == 1),
+    # all_celltype: response eQTL in all 21 mapped cell types (any treatment)
+    all_celltype         = (n_celltypes == 21),
+    # all_five_drug: response eQTL in all 5 treatments (any cell type)
+    all_five_drug        = (n_drugs == 5),
+    # global_drug_specific: response eQTL in exactly one treatment globally.
+    # Complementary end of the specificity spectrum from all_five_drug.
+    global_drug_specific = (n_drugs == 1),
+    # condition_specific: response eQTL in exactly one (celltype × treatment) pair.
+    # Most granular specificity; corresponds to manuscript S13.
+    condition_specific   = (n_conditions == 1)
+  )
+
+# global_specific_drug: treatment-specific across the whole dataset
+# Record which drug it is global treatment-specific for,NA when global_drug_specific == FALSE.
+global_drug_label <- df_raw %>%
+  group_by(gene_snp) %>%
+  summarise(
+    global_specific_drug = if_else(
+      n_distinct(treatment) == 1,
+      first(treatment),
+      NA_character_
+    ),
+    .groups = "drop"
+  )
+
+locus_flags <- locus_flags %>%
+  left_join(global_drug_label, by = "gene_snp")
+```
+
+```{r compute-flags-per-locus-celltype}
+# Per-(gene_snp, celltype) flags
+
+# within_celltype_drug_specific: within a given cell type, this locus is a response eQTL for exactly one drug.
+# Note: same locus can be ct-specific to Cri in retina and ct-specific to Lor in neurons simultaneously
+# List which drug it is specific to for that cell type
+wct_flags <- wct_per_pair %>%
+  mutate(
+    # all_five_within_celltype: TRUE only when THIS cell type has all 5 drugs for this locus.
+    # Per-(gene_snp, celltype) flag — not a locus-level flag. A row where n_drugs_in_ct < 5
+    # gets FALSE even if the locus qualifies in another cell type.
+    all_five_within_celltype   = (n_drugs_in_ct == 5),
+    within_celltype_drug_specific = (n_drugs_in_ct == 1)
+  ) %>%
+  left_join(
+    df_raw %>%
+      group_by(gene_snp, celltype) %>%
+      summarise(
+        within_ct_specific_drug = if_else(
+          n_distinct(treatment) == 1, first(treatment), NA_character_
+        ),
+        .groups = "drop"
+      ),
+    by = c("gene_snp", "celltype")
+  )
+```
+
+
+# S18 — Full annotated response eQTL table
+
+```{r build-s10-annotated}
+# Parse allele fields from SNP ID
+# SNP format: chr:pos:REF_ALT (e.g., "8:41245044:C_T")
+# Parsing logic mirrors find_specific_eqtl_examples.R lines 378-385 exactly.
+# Group 1 = chromosome, 2 = position, 3 = REF allele, 4 = ALT allele
+snp_parsed <- str_match(
+  df_raw$snp,
+  "^([^:]+):([0-9]+):([A-Za-z]+)_([A-Za-z]+)$"
+)
+n_parse_fail <- sum(is.na(snp_parsed[, 1]))
+if (n_parse_fail > 0) {
+  warning(n_parse_fail, " SNP IDs did not match expected chr:pos:REF_ALT format.")
+}
+
+# Full annotated response eQTL table
+
+df_annotated <- df_raw %>%
+  mutate(
+    # Parsed allele fields
+    chr        = snp_parsed[, 2],
+    pos        = as.integer(snp_parsed[, 3]),
+    ref_allele = snp_parsed[, 4],
+    alt_allele = snp_parsed[, 5],
+
+    # Direction of effect: "+" = more expression per additional ALT copy (i.e. is beta positive or negative)
+    direction_treat   = if_else(beta_treat   >= 0, "+", "-"),
+    direction_control = if_else(beta_control >= 0, "+", "-"),
+
+    # sign_flip: drug inverts the direction of the genotype effect (if beta in control != beta in treatment)
+    sign_flip = (sign(beta_treat) != sign(beta_control)),
+
+    # Significance flags (lfsr < 0.05 = significant by mashr convention)
+    sig_treat      = (lfsr_treat   < 0.05),
+    sig_control    = (lfsr_control < 0.05),
+    sig_both       = (lfsr_treat   < 0.05 & lfsr_control < 0.05),
+    sig_treat_only = (lfsr_treat   < 0.05 & lfsr_control >= 0.05), # sig_treat_only: detectable only under treatment
+    sig_control_only = (lfsr_control   < 0.05 & lfsr_treat >= 0.05),
+
+    # abs_delta_beta: magnitude of the treated-vs-control effect change.
+    # Primary continuous ranking criterion for candidate selection.
+    abs_delta_beta = abs(beta_treat - beta_control)
+  ) %>%
+  # Join per-locus specificity flags
+  left_join(locus_flags, by = "gene_snp") %>%
+  # Join per-(locus, celltype) flags
+  left_join(
+    wct_flags %>% dplyr::select(gene_snp, celltype,
+                         all_five_within_celltype,
+                         within_celltype_drug_specific, within_ct_specific_drug,
+                         n_drugs_in_ct),
+    by = c("gene_snp", "celltype")
+  )
+
+# Confirm no row duplication from joins (both flag tables are 1:1 with df_raw keys)
+stopifnot(
+  "Row count changed after join — check for duplicates in flag tables" =
+    nrow(df_annotated) == nrow(df_raw)
+)
+
+cat("Full response eQTL table annotated:", nrow(df_annotated), "rows,", ncol(df_annotated), "columns\n")
+write_both(df_annotated, "SX_full_response_eqtl_annotated")
+```
+
+
+# S22 — Within-cell-type drug-specific loci
+
+Rows where the gene-SNP pair is a response eQTL for exactly one drug **in this cell type**.
+An eQTL can appear in multiple rows if it is ct-specific to different drugs in different cell types.
+
+```{r subset-within-ct-drug-specific}
+subset_wct <- df_annotated %>%
+  filter(within_celltype_drug_specific) %>%
+  arrange(desc(abs_delta_beta), desc(fold_change))
+
+write_both(subset_wct, "subset_within_celltype_drug_specific")
+
+kable(
+  subset_wct %>%
+    group_by(treatment) %>%
+    summarise(n_loci = n_distinct(gene_snp), .groups = "drop"),
+  caption = sprintf("Within-ct drug-specific loci by drug (%d total unique)", n_within_ct_specific_loci)
+)
+```
+
+
+# S19 — Condition-specific loci
+
+Response eQTLs detected in exactly one (celltype × treatment) condition globally.
+
+```{r subset-condition-specific}
+subset_cond <- df_annotated %>%
+  filter(condition_specific) %>%
+  arrange(desc(abs_delta_beta), desc(fold_change))
+
+write_both(subset_cond, "subset_condition_specific")
+
+kable(
+  subset_cond %>%
+    group_by(treatment) %>%
+    summarise(n_loci = n_distinct(gene_snp), .groups = "drop"),
+  caption = sprintf("Condition-specific loci by drug (%d total)", n_condition_specific)
+)
+```
+
+
+# S21 — Table 1-anchored supplementary table
+
+Joins the master annotated table with Table 1 (drug × adverse event × cell type), restricted to the cell types and drugs in the response eQTLs.
+Each row in the output is a response eQTL with its Table 1 clinical context: drug generation, additional targets, adverse event, and reported incidence.
+
+The join is on (treatment == drug_abbr, celltype == eqtl_celltype):
+
+- `drug_abbr`: full drug name mapped to 3-letter code (Crizotinib → Cri, etc.)
+- `reqtl_celltype`: readable Table 1 cell type name mapped to S10 compact name
+  (e.g., "Bronchiolar/alveolar epithelial cells" → "Bronchiolar_and_alveolar_epithelial_cells")
+
+Cell types not in S10 (e.g., Stellate cells, Skeletal muscle cells, Ductal cells)
+are excluded naturally by the inner join — only rows with a confirmed S10 cell type
+will appear in the output.
+
+```{r table1-load}
+# Load Table 1 long-format CSV
+# Written by this session at: code/mash/Table1_adverse_events_long.csv
+table1_long <- read_csv(
+  file.path(code_dir, "Table1_adverse_events_long.csv"),
+  col_types = cols(.default = col_character()),
+  show_col_types = FALSE
+)
+
+cat("Table1 loaded:", nrow(table1_long), "rows\n")
+```
+
+```{r table1-add-drug-abbr}
+# Map full drug names to 3-letter treatment codes used in eQTL data.
+# These codes are the canonical abbreviations throughout the manuscript.
+drug_abbr_map <- c(
+  "Alectinib"   = "Ale",
+  "Brigatinib"  = "Bri",
+  "Ceritinib"   = "Cer",
+  "Crizotinib"  = "Cri",
+  "Lorlatinib"  = "Lor"
+)
+
+table1_long <- table1_long %>%
+  mutate(drug_abbr = drug_abbr_map[Drug])
+
+# Verify all drugs mapped
+unmapped_drugs <- table1_long %>%
+  filter(is.na(drug_abbr)) %>%
+  pull(Drug) %>%
+  unique()
+if (length(unmapped_drugs) > 0) {
+  warning("Unmapped drug names in Table1: ", paste(unmapped_drugs, collapse = ", "))
+}
+```
+
+```{r table1-add-s10-celltype}
+# Map Table 1 readable cell type names to S10 compact names.
+# Most are a direct substitution of spaces with underscores; exceptions:
+#   "Bronchiolar/alveolar epithelial cells" → "Bronchiolar_and_alveolar_epithelial_cells"
+#     (the "/" becomes "_and_", matching the S10 vocabulary)
+#   "Retinal progenitors/Muller glia" → "Retinal_progenitors_and_Muller_glia"
+#     (same pattern — the "/" becomes "_and_")
+#   "Vascular endothelial cells" → "Vascular_endothelial_cells"
+#     (kept as-is with underscores; this is the exact S10 name)
+#   "Neuronal IPC" → "Neuronal_IPC"
+#     (confirmed in ae_celltype_map.csv for Lor CNS_effects)
+#   "ENS glia" → "ENS_glia"
+#     (confirmed in ae_celltype_map.csv for Cer GI_toxicity)
+#   "Oligo" → excluded (oligodendrocytes not in S10; Table1 eQTL_mapped=No)
+# Cell types not present in this map (Stellate cells, Ductal cells, etc.)
+# will have reqtl_celltype=NA and be dropped by the inner join below.
+
+table1_to_response <- tribble(
+  ~table1_celltype,                          ~reqtl_celltype,
+  "Hepatoblasts",                            "Hepatoblasts",
+  "Bronchiolar/alveolar epithelial cells",   "Bronchiolar_and_alveolar_epithelial_cells",
+  "Ciliated epithelial cells",               "Ciliated_epithelial_cells",
+  "Stromal cells",                           "Stromal_cells",
+  "Cardiac mesoderm cells",                  "Cardiac_mesoderm_cells",
+  "Metanephric cells",                       "Metanephric_cells",
+  "Retinal neurons",                         "Retinal_neurons",
+  "Retinal pigment cells",                   "Retinal_pigment_cells",
+  "Retinal progenitors/Muller glia",         "Retinal_progenitors_and_Muller_glia",
+  "Vascular endothelial cells",              "Vascular_endothelial_cells",
+  "ENS glia",                                "ENS_glia",
+  "Goblet cells",                            "Goblet_cells",
+  "Epicardial fat cells",                    "Epicardial_fat_cells",
+  "Squamous epithelial cells",               "Squamous_epithelial_cells",
+  "Glioblast",                               "Glioblast",
+  "Neuroblast",                              "Neuroblast",
+  "Neuron",                                  "Neuron",
+  "Neuronal IPC",                            "Neuronal_IPC",
+  "Radial glia",                             "Radial_glia"
+  # Skeletal muscle cells: not in S10 — will be dropped by inner join
+  # Satellite cells: not in S10
+  # Stellate cells: not in S10
+  # Ductal cells / Acinar cells: not in S10
+  # Lens fibre cells: not in S10
+  # Cardiomyocytes / Endocardial cells: not in S10
+  # Islet endocrine cells: not in S10
+  # Smooth cells / Smooth muscle cells: not in S10
+  # Myeloid cells: not in S10
+  # Oligo: not in S10
+)
+
+table1_long <- table1_long %>%
+  left_join(table1_to_response, by = c("Cell_type" = "table1_celltype"))
+
+# Report which Table1 cell types have no S10 mapping
+no_mapping <- table1_long %>%
+  filter(is.na(reqtl_celltype)) %>%
+  pull(Cell_type) %>%
+  unique() %>%
+  sort()
+cat("Table1 cell types without eQTL mapping (will be dropped by join):\n")
+cat(paste("  -", no_mapping, collapse = "\n"), "\n")
+```
+
+```{r table1-anchored-join}
+# eQTL cell types (used to verify Table1 mappings are in the S10 vocabulary)
+eqtl_celltypes <- sort(unique(df_raw$celltype))
+
+# Prepare Table1 metadata columns to carry into the join.
+# Keep both the Table1 AE description (full, informative) and a clean
+# identifier for matching. Also verify that all eqtl_celltypes in Table1
+# (with eQTL_mapped=Yes) are indeed present in the S10 vocabulary.
+table1_meta <- table1_long %>%
+  filter(!is.na(reqtl_celltype)) %>%
+  # Verify: reqtl_celltype must be a real S10 cell type
+  mutate(
+    s10_confirmed = reqtl_celltype %in% eqtl_celltypes
+  )
+
+not_in_eqtl <- table1_meta %>%
+  filter(!s10_confirmed) %>%
+  dplyr::select(Drug, Adverse_event, Cell_type, reqtl_celltype) %>%
+  distinct()
+if (nrow(not_in_eqtl) > 0) {
+  warning("The following eqtl_celltype values are not in the response eQTL vocabulary:\n",
+          paste(capture.output(print(not_in_eqtl)), collapse = "\n"))
+}
+
+# Build Table1 metadata frame for joining: one row per (drug_abbr, reqtl_celltype, AE)
+table1_meta_clean <- table1_meta %>%
+  filter(s10_confirmed) %>%
+  dplyr::select(
+    drug_abbr,
+    Drug_fullname    = Drug,
+    Generation       = Generation,
+    Additional_non_ALK_targets = Additional_non_ALK_targets,
+    Adverse_event_table1       = Adverse_event,
+    Most_common_reaction       = Most_common_reaction_asterisk,
+    Reported_incidence         = Reported_incidence,
+    Cell_type_table1           = Cell_type,
+    reqtl_celltype
+  )
+
+# Inner join: only loci in cell types AND drugs covered by Table 1
+# Many-to-many: a locus in Hepatoblasts × Lor appears under Hepatotoxicity,
+# Hyperlipidemia, AND Hyperglycemia (all Table1 AEs for Lor that map to Hepatoblasts)
+S_table1_anchored <- df_annotated %>%
+  inner_join(
+    table1_meta_clean,
+    by = c("treatment" = "drug_abbr", "celltype" = "reqtl_celltype"),
+    relationship = "many-to-many"
+  )
+
+# Summary counts for display
+counts_table1 <- S_table1_anchored %>%
+  group_by(treatment, Adverse_event_table1) %>%
+  summarise(
+    n_loci = n_distinct(gene_snp),
+    n_rows = n(),
+    .groups = "drop"
+  )
+
+cat("S_table1_anchored:", nrow(S_table1_anchored), "rows,",
+    n_distinct(S_table1_anchored$gene_snp), "unique loci\n")
+
+write_both(S_table1_anchored, "S_table1_anchored")
+
+kable(
+  counts_table1,
+  caption = sprintf(
+    "S_table1_anchored: loci per (drug, Table1 AE) (%d rows, %d unique loci)",
+    nrow(S_table1_anchored), n_distinct(S_table1_anchored$gene_snp)
+  )
+)
+```

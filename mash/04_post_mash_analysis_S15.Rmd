@@ -1,0 +1,1333 @@
+---
+title: "mash results; post-hoc analysis v2"
+output: html_document
+date: '2025-07-07'
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(data.table)
+library(ashr)
+library(mashr)
+library(flashier)
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+library(patchwork)
+
+source("/project/gilad/geena/publication_clean/code/mash/mash_helpers.R")
+
+results_dir <- "/project/gilad/geena/publication_clean/results/mash/medianUMI1/"
+gene_loc_file <- "/project2/gilad/wenhe/EB/combined_3_4/data/ref_set/concise_GRCh38-2020_gtf_strand_considered.csv"
+lfsr_thresh <- 0.05
+treatments <- c("Ale", "Bri", "Cer", "Cri", "Lor")
+```
+
+
+# Load MASH results
+```{r load_mash}
+m2 <- readRDS(paste0(results_dir, "m2.rds"))
+
+lfsr <- m2$result$lfsr
+beta <- m2$result$PosteriorMean
+sd   <- m2$result$PosteriorSD
+
+colnames(lfsr) <- gsub("_formash\\.out$", "_lfsr", colnames(lfsr))
+colnames(beta) <- gsub("_formash\\.out$", "_beta", colnames(beta))
+colnames(sd)   <- gsub("_formash\\.out$", "_sd",   colnames(sd))
+
+combined_mash_results <- cbind(lfsr, beta, sd) %>%
+  as.data.frame() %>%
+  mutate(gene = sapply(strsplit(rownames(.), "_"), `[[`, 1),
+         gene_snp = rownames(.))
+
+write_tsv(combined_mash_results,
+          paste0(results_dir, "combined_mash_results.tsv"))
+
+# Combined results can also be loaded directly:
+# combined_mash_results <- read_tsv(paste0(results_dir, "combined_mash_results.tsv"))
+
+celltypes <- unique(gsub(
+  "_(Ale|Bri|Cer|Cri|Lor|Control)_(lfsr|beta|sd)$", "",
+  grep("_(lfsr|beta|sd)$", colnames(combined_mash_results), value = TRUE)
+))
+```
+
+
+# Overall eQTL counts
+```{r overall_counts}
+lfsr_cols <- grep("_lfsr$", colnames(combined_mash_results), value = TRUE)
+
+significant_eqtls <- combined_mash_results %>%
+  filter(rowSums(dplyr::select(., all_of(lfsr_cols)) < lfsr_thresh, na.rm = TRUE) > 0)
+
+cat("Unique significant eQTLs (LFSR <", lfsr_thresh, ") in any condition:",
+    n_distinct(significant_eqtls$gene_snp), "\n")
+cat("Associated eGenes:", n_distinct(significant_eqtls$gene), "\n")
+```
+
+
+# Counts by condition
+```{r counts_by_condition}
+long_lfsr <- combined_mash_results %>%
+  dplyr::select(gene_snp, all_of(lfsr_cols)) %>%
+  pivot_longer(-gene_snp, names_to = "condition", values_to = "lfsr") %>%
+  mutate(
+    condition = sub("_lfsr$", "", condition),
+    treatment = sub(".*_", "", condition),
+    celltype  = sub("_(Control|Ale|Bri|Cer|Cri|Lor)$", "", condition),
+    gene      = sub("_.*$", "", gene_snp)
+  )
+
+eqtl_counts_by_condition <- long_lfsr %>%
+  filter(lfsr < lfsr_thresh) %>%
+  group_by(condition) %>%
+  summarise(n_sig_eqtls = n_distinct(gene_snp), .groups = "drop") %>%
+  arrange(desc(n_sig_eqtls))
+
+eqtl_counts_by_treatment <- long_lfsr %>%
+  filter(lfsr < lfsr_thresh) %>%
+  group_by(treatment) %>%
+  summarise(n_sig_eqtls = n_distinct(gene_snp), .groups = "drop") %>%
+  arrange(desc(n_sig_eqtls))
+
+eqtl_counts_by_celltype <- long_lfsr %>%
+  filter(lfsr < lfsr_thresh) %>%
+  group_by(celltype) %>%
+  summarise(n_sig_eqtls = n_distinct(gene_snp), .groups = "drop") %>%
+  arrange(desc(n_sig_eqtls))
+
+print(eqtl_counts_by_condition)
+print(eqtl_counts_by_treatment)
+print(eqtl_counts_by_celltype)
+```
+
+
+# Summary stats: eQTLs per condition (for manuscript)
+```{r condition_summary_stats}
+# Range, median, and top/bottom combos for the eQTL-per-condition statistic
+# referenced in the Results.
+condition_summary <- eqtl_counts_by_condition %>%
+  mutate(
+    treatment = sub(".*_", "", condition),
+    celltype  = sub("_(Control|Ale|Bri|Cer|Cri|Lor)$", "", condition)
+  )
+
+cat("eQTLs per (cell type × condition) — across all",
+    nrow(condition_summary), "combinations:\n")
+cat(sprintf("  min = %d  median = %g  max = %d\n",
+            min(condition_summary$n_sig_eqtls),
+            median(condition_summary$n_sig_eqtls),
+            max(condition_summary$n_sig_eqtls)))
+
+cat("\nTop 10 (cell type × treatment) combos:\n")
+print(condition_summary %>%
+        arrange(desc(n_sig_eqtls)) %>% head(10))
+
+cat("\nBottom 10:\n")
+print(condition_summary %>%
+        arrange(n_sig_eqtls) %>% head(10))
+
+# Per drug: total eQTLs summed across cell types, plus per-cell-type spread
+per_drug_summary <- condition_summary %>%
+  group_by(treatment) %>%
+  summarise(
+    total_eqtls = sum(n_sig_eqtls),
+    median_per_ct = median(n_sig_eqtls),
+    min_per_ct = min(n_sig_eqtls),
+    max_per_ct = max(n_sig_eqtls),
+    n_ct = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_eqtls))
+cat("\nPer-treatment summary (sums and spread across cell types):\n")
+print(per_drug_summary)
+
+# Per cell type: total eQTLs summed across the 6 conditions
+per_ct_summary <- condition_summary %>%
+  group_by(celltype) %>%
+  summarise(
+    total_eqtls = sum(n_sig_eqtls),
+    median_per_cond = median(n_sig_eqtls),
+    min_per_cond = min(n_sig_eqtls),
+    max_per_cond = max(n_sig_eqtls),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_eqtls))
+cat("\nPer-cell-type summary (sums and spread across 6 conditions):\n")
+print(per_ct_summary, n = Inf)
+
+write.csv(condition_summary,
+          file.path(results_dir, "eqtls_per_condition_summary.csv"),
+          row.names = FALSE)
+write.csv(per_drug_summary,
+          file.path(results_dir, "eqtls_per_treatment_summary.csv"),
+          row.names = FALSE)
+write.csv(per_ct_summary,
+          file.path(results_dir, "eqtls_per_celltype_summary.csv"),
+          row.names = FALSE)
+```
+
+
+# Mutually exclusive vs shared eQTLs
+```{r mutual_exclusivity}
+signif_long <- long_lfsr %>%
+  filter(lfsr < lfsr_thresh) %>%
+  dplyr::select(gene_snp, gene, condition, celltype, treatment)
+
+eqtl_condition_counts <- signif_long %>%
+  group_by(gene_snp) %>%
+  summarise(n_conditions = n_distinct(condition), .groups = "drop")
+
+signif_long <- signif_long %>%
+  left_join(eqtl_condition_counts, by = "gene_snp")
+
+cat("Total unique significant eQTLs:", n_distinct(signif_long$gene_snp), "\n")
+cat("Significant in only 1 condition:",
+    sum(eqtl_condition_counts$n_conditions == 1), "\n")
+cat("Significant in >1 condition:",
+    sum(eqtl_condition_counts$n_conditions > 1), "\n")
+```
+
+
+# eGene discovery per cell type and treatment
+```{r egene_discovery}
+egene_counts <- long_lfsr %>%
+  filter(lfsr < lfsr_thresh) %>%
+  distinct(gene, condition, celltype, treatment) %>%
+  group_by(condition, celltype, treatment) %>%
+  summarise(num_egenes = n(), .groups = "drop")
+
+celltype_palette  <- RColorBrewer::brewer.pal(12, "Set3")
+all_celltypes     <- sort(unique(egene_counts$celltype))
+celltype_colors   <- setNames(
+  colorRampPalette(celltype_palette)(length(all_celltypes)),
+  all_celltypes
+)
+
+p_egene <- ggplot(egene_counts, aes(x = treatment, y = num_egenes, fill = celltype)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = paste0("eGene Discovery per Cell Type and Treatment (LFSR < ", lfsr_thresh, ")"),
+    x = "Treatment", y = "Number of eGenes", fill = "Cell Type"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "right")
+
+dir.create(file.path(results_dir, "plots"), showWarnings = FALSE)
+ggsave(
+  file.path(results_dir, "plots", paste0("eGene_discovery_LFSR", lfsr_thresh, ".pdf")),
+  p_egene, width = 12, height = 6
+)
+
+# Heatmap of steady-state eGene counts
+ct_order_egenes <- egene_counts %>%
+  group_by(celltype) %>%
+  summarise(total = sum(num_egenes), .groups = "drop") %>%
+  arrange(desc(total)) %>%
+  pull(celltype)
+
+egene_counts_heat <- egene_counts %>%
+  mutate(
+    celltype  = factor(gsub("_", " ", celltype),
+                       levels = rev(gsub("_", " ", ct_order_egenes))),
+    treatment = factor(treatment, levels = c("Control", "Ale", "Bri", "Cer", "Cri", "Lor"))
+  )
+
+p_egene_heatmap <- ggplot(egene_counts_heat,
+                          aes(x = celltype, y = treatment, fill = num_egenes)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  scale_fill_gradient(low = "#deebf7", high = "#2C7BB6", name = "eGenes") +
+  coord_fixed() +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 1, size = 18),
+    axis.text.y  = element_text(size = 18),
+    axis.title.y = element_text(size = 20),
+    panel.grid   = element_blank(),
+    legend.position = "right",
+    legend.text  = element_text(size = 16),
+    legend.title = element_text(size = 17),
+    plot.title   = element_text(size = 16)
+  ) +
+  labs(
+    x     = NULL,
+    y     = "Treatment",
+    title = paste0("eGene discovery per cell type and treatment (LFSR < ", lfsr_thresh, ")")
+  )
+
+ggsave(file.path(results_dir, "plots", "eGene_heatmap.pdf"),
+       p_egene_heatmap, width = 14, height = 6)
+
+p_egene_heatmap
+```
+
+
+# Run sharing pipeline across fold-change thresholds
+```{r run_sharing_pipeline}
+lfc_factors <- c(1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 7, 8, 9, 10)
+
+
+for (lfc in lfc_factors) {
+  message("Running sharing pipeline: fold-change ", lfc)
+  run_sharing_pipeline(
+    combined_mash_results = combined_mash_results,
+    lfc_factor = lfc,
+    output_dir_base = results_dir,
+    sig_mode = "treat_or_control"
+  )
+}
+```
+
+
+# Counts of treatment-responsive eQTLs per condition
+```{r responsive_counts}
+lfc <- 3
+
+treatment_responsive_df <- read_tsv(
+  file.path(results_dir, paste0("lfc", lfc), "treatment_responsive_eqtls_signfixed.tsv"),
+  show_col_types = FALSE
+) %>% dplyr::select(-sig_mode)
+
+cond_counts <- treatment_responsive_df %>%
+  group_by(celltype, treatment) %>%
+  summarise(n_responsive = n_distinct(gene_snp), .groups = "drop") %>%
+  arrange(desc(n_responsive))
+print(cond_counts)
+cat("Min:", min(cond_counts$n_responsive),
+    "  Median:", median(cond_counts$n_responsive),
+    "  Max:", max(cond_counts$n_responsive), "\n")
+
+# Distribution of how many conditions each responsive eQTL appears in
+eqtl_occurrence <- treatment_responsive_df %>%
+  count(gene_snp, name = "n_conditions") %>%
+  arrange(desc(n_conditions))
+
+p_occur <- eqtl_occurrence %>%
+  count(n_conditions) %>%
+  ggplot(aes(x = n_conditions, y = n)) +
+  geom_bar(stat = "identity", fill = "#619CFF", color = "black") +
+  theme_classic(base_size = 14) +
+  labs(x = "Number of conditions (treatment-cell type)",
+       y = "Number of treatment-responsive eQTLs")
+
+plot_dir <- file.path(results_dir, paste0("lfc", lfc), "plots")
+dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+ggsave(file.path(plot_dir, "counts_of_eqtls_condition.pdf"),
+       p_occur, width = 8, height = 4)
+
+cat(n_distinct(treatment_responsive_df$gene_snp[
+      eqtl_occurrence$n_conditions[match(treatment_responsive_df$gene_snp,
+                                         eqtl_occurrence$gene_snp)] == 1]),
+    "of", n_distinct(treatment_responsive_df$gene_snp),
+    "responsive eQTLs are present in only one condition\n")
+
+# Count per treatment (collapsed across cell types)
+cat("\nResponse eQTLs per treatment (unique gene_snp per treatment):\n")
+treatment_responsive_df %>%
+  group_by(treatment) %>%
+  summarise(n = n_distinct(gene_snp), .groups = "drop") %>%
+  arrange(desc(n)) %>%
+  print()
+
+# Count per cell type (collapsed across treatment)
+cat("\nResponse eQTLs per cell type (unique gene_snp per cell type):\n")
+treatment_responsive_df %>%
+  group_by(celltype) %>%
+  summarise(n = n_distinct(gene_snp), .groups = "drop") %>%
+  arrange(desc(n)) %>%
+  print()
+
+# Cell type occurrence: how many unique cell types each eQTL appears in
+n_celltypes_total <- n_distinct(treatment_responsive_df$celltype)
+celltype_occurrence <- treatment_responsive_df %>%
+  distinct(gene_snp, celltype) %>%
+  count(gene_snp, name = "n_celltypes")
+
+cat("\nResponse eQTLs found in only 1 cell type:",
+    sum(celltype_occurrence$n_celltypes == 1), "\n")
+cat("Response eQTLs found in all", n_celltypes_total, "cell types:",
+    sum(celltype_occurrence$n_celltypes == n_celltypes_total), "\n")
+```
+
+
+# Response eGene discovery per cell type and treatment
+```{r response_egene_discovery}
+response_egene_counts <- treatment_responsive_df %>%
+  distinct(gene, celltype, treatment) %>%
+  group_by(celltype, treatment) %>%
+  summarise(num_egenes = n(), .groups = "drop")
+
+all_celltypes_resp  <- sort(unique(response_egene_counts$celltype))
+celltype_colors_resp <- setNames(
+  colorRampPalette(RColorBrewer::brewer.pal(12, "Set3"))(length(all_celltypes_resp)),
+  all_celltypes_resp
+)
+
+p_response_egene <- ggplot(response_egene_counts,
+                           aes(x = treatment, y = num_egenes, fill = celltype)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_fill_manual(values = celltype_colors_resp) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = paste0("Response eGene Discovery per Cell Type and Treatment (fold change ≥ ", lfc, ")"),
+    x = "Treatment", y = "Number of response eGenes", fill = "Cell Type"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "right")
+
+plot_dir <- file.path(results_dir, paste0("lfc", lfc), "plots")
+ggsave(file.path(plot_dir, "response_eGene_discovery.pdf"),
+       p_response_egene, width = 12, height = 6)
+
+p_response_egene
+```
+
+
+# Heatmap: response eGene counts per cell type and treatment
+```{r response_egene_heatmap}
+# Use same cell type order as steady-state heatmap for comparability
+response_egene_counts_heat <- response_egene_counts %>%
+  mutate(
+    celltype  = factor(gsub("_", " ", celltype),
+                       levels = rev(gsub("_", " ", ct_order_egenes))),
+    treatment = factor(treatment, levels = c("Ale", "Bri", "Cer", "Cri", "Lor"))
+  )
+
+p_response_heatmap <- ggplot(response_egene_counts_heat,
+                             aes(x = celltype, y = treatment, fill = num_egenes)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  scale_fill_gradient(low = "#fde0dc", high = "#C0392B", name = "Response\neGenes") +
+  coord_fixed() +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 1, size = 18),
+    axis.text.y  = element_text(size = 18),
+    axis.title.y = element_text(size = 20),
+    panel.grid   = element_blank(),
+    legend.position = "right",
+    legend.text  = element_text(size = 16),
+    legend.title = element_text(size = 17),
+    plot.title   = element_text(size = 16)
+  ) +
+  labs(
+    x     = NULL,
+    y     = "Treatment",
+    title = paste0("Response eGene discovery per cell type and treatment (fold change ≥ ", lfc, ")")
+  )
+
+plot_dir <- file.path(results_dir, paste0("lfc", lfc), "plots")
+ggsave(file.path(plot_dir, "response_eGene_heatmap.pdf"),
+       p_response_heatmap, width = 14, height = 6)
+
+egene_response_table <- egene_counts %>%
+  select(celltype, treatment, num_egenes) %>%
+  rename(n_egenes = num_egenes) %>%
+  left_join(response_egene_counts %>% rename(n_response_egenes = num_egenes),
+            by = c("celltype", "treatment")) %>%
+  arrange(celltype, treatment)
+
+write.csv(egene_response_table, file.path(plot_dir, "egene_and_response_egene_counts.csv"), row.names = FALSE)
+
+p_response_heatmap
+
+# Strip plot: response eGene counts per cell type (one point per treatment)
+ct_order_strip <- response_egene_counts %>%
+  group_by(celltype) %>%
+  summarise(median_egenes = median(num_egenes), .groups = "drop") %>%
+  arrange(median_egenes) %>%
+  pull(celltype)
+
+response_egene_counts_strip <- response_egene_counts %>%
+  mutate(
+    celltype  = factor(gsub("_", " ", celltype),
+                       levels = gsub("_", " ", ct_order_strip)),
+    treatment = factor(treatment, levels = c("Ale", "Bri", "Cer", "Cri", "Lor"))
+  )
+
+p_response_strip <- ggplot(response_egene_counts_strip,
+                           aes(x = num_egenes, y = celltype, color = treatment)) +
+  geom_point(size = 2.5, alpha = 0.85, position = position_dodge(width = 0.5)) +
+  scale_color_manual(name = "Treatment", values = tx_colors) +
+  theme_classic(base_size = 13) +
+  theme(
+    axis.text.y = element_text(size = 11),
+    legend.position = "right"
+  ) +
+  labs(
+    x     = "Number of response eGenes",
+    y     = NULL,
+    title = paste0("Response eGene discovery per cell type (fold change ≥ ", lfc, ")")
+  )
+
+ggsave(file.path(plot_dir, "response_eGene_strip.pdf"),
+       p_response_strip, width = 9, height = 8)
+p_response_strip
+```
+
+# Total vs. response eGenes per cell type: power check
+```{r response_vs_total_egenes}
+plot_dir <- file.path(results_dir, paste0("lfc", lfc), "plots")
+
+tx_colors <- c("Ale" = "#E69F00", "Bri" = "#1A78C2",
+                "Cer" = "#009E73", "Cri" = "#CC79A7", "Lor" = "#7B2D8B")
+
+# --- Plot 1: per condition (one point per cell type x treatment), size = number of individuals ---
+pseudobulk_dir <- "/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/pseudobulk_15cells_20indiv_summary"
+indiv_counts_by_tx <- read.delim(file.path(pseudobulk_dir, "celltype_individual_counts.tsv")) %>%
+  rename(celltype = cellid_type) %>%
+  mutate(celltype = gsub(" ", "_", celltype))
+
+power_check_cond <- egene_counts %>%
+  filter(treatment != "Control") %>%
+  rename(total_egenes = num_egenes) %>%
+  inner_join(response_egene_counts, by = c("celltype", "treatment")) %>%
+  rename(response_egenes = num_egenes) %>%
+  left_join(indiv_counts_by_tx, by = c("celltype", "treatment")) %>%
+  mutate(label = gsub("_", " ", celltype))
+
+r_cond <- cor(power_check_cond$total_egenes, power_check_cond$response_egenes)
+cat("Pearson r per condition:", round(r_cond, 3), "\n")
+cat("Number of conditions:", nrow(power_check_cond), "\n")
+
+# Top 2 by response eGenes per treatment (labels unique cell type x treatment combos)
+outlier_labels_cond <- power_check_cond %>%
+  group_by(treatment) %>%
+  slice_max(response_egenes, n = 2) %>%
+  ungroup()
+
+p_power_cond <- ggplot(power_check_cond,
+                       aes(x = total_egenes, y = response_egenes,
+                           color = treatment, label = label)) +
+  geom_point(size = 2, alpha = 0.8) +
+  ggrepel::geom_text_repel(data = outlier_labels_cond,
+                            size = 2.8, max.overlaps = Inf,
+                            segment.color = "grey60", segment.size = 0.3,
+                            box.padding = 0.4, show.legend = FALSE) +
+  annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.8,
+           label = paste0("r = ", round(r_cond, 2)), size = 3.5, color = "grey30") +
+  scale_color_manual(name = "Treatment", values = tx_colors) +
+  theme_classic(base_size = 13) +
+  labs(x = "Number of eGenes",
+       y = "Number of response eGenes")
+
+ggsave(file.path(plot_dir, "response_vs_total_egenes_per_condition.pdf"),
+       p_power_cond, width = 8, height = 6)
+p_power_cond
+
+# --- Plot 2: per cell type (averaged across treatments) ---
+power_check_ct <- egene_counts %>%
+  filter(treatment != "Control") %>%
+  group_by(celltype) %>%
+  summarise(mean_total_egenes = mean(num_egenes), .groups = "drop") %>%
+  inner_join(
+    response_egene_counts %>%
+      group_by(celltype) %>%
+      summarise(mean_response_egenes = mean(num_egenes), .groups = "drop"),
+    by = "celltype"
+  ) %>%
+  mutate(label = gsub("_", " ", celltype))
+
+r_ct <- cor(power_check_ct$mean_total_egenes, power_check_ct$mean_response_egenes)
+cat("Pearson r per cell type:", round(r_ct, 3), "\n")
+
+p_power_ct <- ggplot(power_check_ct,
+                     aes(x = mean_total_egenes, y = mean_response_egenes, label = label)) +
+  geom_point(size = 2.5, color = "#C0392B", alpha = 0.8) +
+  ggrepel::geom_text_repel(size = 2.8, max.overlaps = Inf,
+                            segment.color = "grey60", segment.size = 0.3,
+                            box.padding = 0.4) +
+  annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.8,
+           label = paste0("r = ", round(r_ct, 2)), size = 3.5, color = "grey30") +
+  theme_classic(base_size = 13) +
+  labs(x = "Mean number of eGenes per treatment",
+       y = "Mean number of response eGenes per treatment")
+
+ggsave(file.path(plot_dir, "response_vs_total_egenes_per_celltype.pdf"),
+       p_power_ct, width = 8, height = 6)
+p_power_ct
+
+# --- Plot 3: response eGenes vs. number of donors per condition ---
+r_indiv <- cor(power_check_cond$num_individuals, power_check_cond$response_egenes,
+               use = "complete.obs")
+cat("Pearson r (donors vs response eGenes):", round(r_indiv, 3), "\n")
+
+p_power_indiv <- ggplot(power_check_cond,
+                        aes(x = num_individuals, y = response_egenes,
+                            color = treatment, label = label)) +
+  geom_point(size = 2, alpha = 0.8) +
+  ggrepel::geom_text_repel(data = outlier_labels_cond,
+                            size = 2.8, max.overlaps = Inf,
+                            segment.color = "grey60", segment.size = 0.3,
+                            box.padding = 0.4, show.legend = FALSE) +
+  annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.8,
+           label = paste0("r = ", round(r_indiv, 2)), size = 3.5, color = "grey30") +
+  scale_color_manual(name = "Treatment", values = tx_colors) +
+  theme_classic(base_size = 13) +
+  labs(x = "Number of donors", y = "Number of response eGenes")
+
+ggsave(file.path(plot_dir, "response_vs_donors_per_condition.pdf"),
+       p_power_indiv, width = 8, height = 6)
+p_power_indiv
+
+# --- Plot 4: response eGenes vs. total cells per condition ---
+cell_counts <- read.delim(
+  file.path(pseudobulk_dir, "cellcount_filter_summary_combined.tsv")
+) %>%
+  rename(celltype = cellid_type) %>%
+  mutate(celltype = gsub(" ", "_", celltype)) %>%
+  group_by(celltype, treatment) %>%
+  summarise(total_cells = sum(num_cells_final), .groups = "drop")
+
+power_check_cells <- power_check_cond %>%
+  left_join(cell_counts, by = c("celltype", "treatment"))
+
+outlier_labels_cells <- power_check_cells %>%
+  group_by(treatment) %>%
+  slice_max(response_egenes, n = 2) %>%
+  ungroup()
+
+r_cells <- cor(power_check_cells$total_cells, power_check_cells$response_egenes,
+               use = "complete.obs")
+cat("Pearson r (total cells vs response eGenes):", round(r_cells, 3), "\n")
+
+p_power_cells <- ggplot(power_check_cells,
+                        aes(x = total_cells, y = response_egenes,
+                            color = treatment, label = label)) +
+  geom_point(size = 2, alpha = 0.8) +
+  ggrepel::geom_text_repel(data = outlier_labels_cells,
+                            size = 2.8, max.overlaps = Inf,
+                            segment.color = "grey60", segment.size = 0.3,
+                            box.padding = 0.4, show.legend = FALSE) +
+  annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.8,
+           label = paste0("r = ", round(r_cells, 2)), size = 3.5, color = "grey30") +
+  scale_color_manual(name = "Treatment", values = tx_colors) +
+  theme_classic(base_size = 13) +
+  labs(x = "Total cells", y = "Number of response eGenes")
+
+ggsave(file.path(plot_dir, "response_vs_cells_per_condition.pdf"),
+       p_power_cells, width = 8, height = 6)
+p_power_cells
+
+# --- Plot 5: response eGenes vs. number of donors in Control ---
+# Use indiv_counts_by_tx if it has Control rows; otherwise fall back to
+# counting unique donors from the cell count summary file.
+if ("Control" %in% indiv_counts_by_tx$treatment) {
+  control_indiv <- indiv_counts_by_tx %>%
+    filter(treatment == "Control") %>%
+    select(celltype, num_individuals_control = num_individuals)
+} else {
+  control_indiv <- read.delim(
+    "/project/gilad/geena/publication_clean/matrixeqtl_input/control/pseudobulk_15cells_1indiv_summary/cellcount_filter_summary_combined.tsv"
+  ) %>%
+    rename(celltype = cellid_type) %>%
+    mutate(celltype = gsub(" ", "_", celltype)) %>%
+    filter(!dropped) %>%
+    group_by(celltype) %>%
+    summarise(num_individuals_control = n_distinct(individual), .groups = "drop")
+}
+
+power_check_control <- power_check_cond %>%
+  left_join(control_indiv, by = "celltype")
+
+outlier_labels_ctrl <- power_check_control %>%
+  group_by(treatment) %>%
+  slice_max(response_egenes, n = 2) %>%
+  ungroup()
+
+r_ctrl_indiv <- cor(power_check_control$num_individuals_control,
+                    power_check_control$response_egenes,
+                    use = "complete.obs")
+cat("Pearson r (control donors vs response eGenes):", round(r_ctrl_indiv, 3), "\n")
+
+p_power_ctrl_indiv <- ggplot(power_check_control,
+                             aes(x = num_individuals_control, y = response_egenes,
+                                 color = treatment, label = label)) +
+  geom_point(size = 2, alpha = 0.8) +
+  ggrepel::geom_text_repel(data = outlier_labels_ctrl,
+                            size = 2.8, max.overlaps = Inf,
+                            segment.color = "grey60", segment.size = 0.3,
+                            box.padding = 0.4, show.legend = FALSE) +
+  annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.8,
+           label = paste0("r = ", round(r_ctrl_indiv, 2)), size = 3.5, color = "grey30") +
+  scale_color_manual(name = "Treatment", values = tx_colors) +
+  theme_classic(base_size = 13) +
+  labs(x = "Number of donors (Control)", y = "Number of response eGenes")
+
+ggsave(file.path(plot_dir, "response_vs_control_donors_per_condition.pdf"),
+       p_power_ctrl_indiv, width = 8, height = 6)
+p_power_ctrl_indiv
+
+# --- Plot 6: response eGenes vs. total cells in Control ---
+control_cells <- read.delim(
+  "/project/gilad/geena/publication_clean/matrixeqtl_input/control/pseudobulk_15cells_1indiv_summary/cellcount_filter_summary_combined.tsv"
+) %>%
+  rename(celltype = cellid_type) %>%
+  mutate(celltype = gsub(" ", "_", celltype)) %>%
+  filter(!dropped) %>%
+  group_by(celltype) %>%
+  summarise(total_cells_control = sum(num_cells_final), .groups = "drop")
+
+power_check_ctrl_cells <- power_check_control %>%
+  left_join(control_cells, by = "celltype")
+
+outlier_labels_ctrl_cells <- power_check_ctrl_cells %>%
+  group_by(treatment) %>%
+  slice_max(response_egenes, n = 2) %>%
+  ungroup()
+
+r_ctrl_cells <- cor(power_check_ctrl_cells$total_cells_control,
+                    power_check_ctrl_cells$response_egenes,
+                    use = "complete.obs")
+cat("Pearson r (control cells vs response eGenes):", round(r_ctrl_cells, 3), "\n")
+
+p_power_ctrl_cells <- ggplot(power_check_ctrl_cells,
+                              aes(x = total_cells_control, y = response_egenes,
+                                  color = treatment, label = label)) +
+  geom_point(size = 2, alpha = 0.8) +
+  ggrepel::geom_text_repel(data = outlier_labels_ctrl_cells,
+                            size = 2.8, max.overlaps = Inf,
+                            segment.color = "grey60", segment.size = 0.3,
+                            box.padding = 0.4, show.legend = FALSE) +
+  annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.8,
+           label = paste0("r = ", round(r_ctrl_cells, 2)), size = 3.5, color = "grey30") +
+  scale_color_manual(name = "Treatment", values = tx_colors) +
+  theme_classic(base_size = 13) +
+  labs(x = "Total cells (Control)", y = "Number of response eGenes")
+
+ggsave(file.path(plot_dir, "response_vs_control_cells_per_condition.pdf"),
+       p_power_ctrl_cells, width = 8, height = 6)
+p_power_ctrl_cells
+
+# --- Combined patchwork figure ---
+p_power_combined <- (p_power_ct + p_power_cond + p_power_indiv + p_power_cells +
+                     p_power_ctrl_indiv + p_power_ctrl_cells) +
+  plot_layout(ncol = 2, guides = "collect") &
+  theme(legend.position = "right")
+
+p_power_combined <- p_power_combined + plot_annotation(tag_levels = "A")
+
+ggsave(file.path(plot_dir, "power_check_combined.pdf"),
+       p_power_combined, width = 14, height = 15)
+p_power_combined
+```
+
+
+# Option 1: forest plot + labeled scatter
+```{r power_summary_forest_scatter}
+# Per-condition table with all six power predictors
+control_std_per_ct <- egene_counts %>%
+  filter(treatment == "Control") %>%
+  dplyr::select(celltype, ctrl_std = num_egenes)
+
+power_table <- response_egene_counts %>%
+  dplyr::rename(response_egenes = num_egenes) %>%
+  left_join(
+    egene_counts %>% filter(treatment != "Control") %>%
+      dplyr::select(celltype, treatment, treat_std = num_egenes),
+    by = c("celltype", "treatment")
+  ) %>%
+  left_join(
+    indiv_counts_by_tx %>% filter(treatment != "Control") %>%
+      dplyr::select(celltype, treatment, treat_donors = num_individuals),
+    by = c("celltype", "treatment")
+  ) %>%
+  left_join(cell_counts %>% dplyr::rename(treat_cells = total_cells),
+            by = c("celltype", "treatment")) %>%
+  left_join(control_std_per_ct, by = "celltype") %>%
+  left_join(control_indiv %>% dplyr::rename(ctrl_donors = num_individuals_control),
+            by = "celltype") %>%
+  left_join(control_cells %>% dplyr::rename(ctrl_cells = total_cells_control),
+            by = "celltype")
+
+predictors  <- c("ctrl_donors", "ctrl_std", "ctrl_cells",
+                 "treat_cells", "treat_std", "treat_donors")
+pred_labels <- c(ctrl_donors  = "Control donors",
+                 ctrl_std     = "Control standard eQTLs",
+                 ctrl_cells   = "Control cells",
+                 treat_cells  = "Treatment cells",
+                 treat_std    = "Treatment standard eQTLs",
+                 treat_donors = "Treatment donors")
+
+boot_r <- function(x, y, n = 2000, seed = 42) {
+  ok <- complete.cases(x, y)
+  x  <- x[ok]; y <- y[ok]
+  set.seed(seed)
+  rs <- replicate(n, {
+    i <- sample.int(length(x), replace = TRUE)
+    suppressWarnings(cor(x[i], y[i]))
+  })
+  data.frame(r  = cor(x, y),
+             lo = unname(quantile(rs, 0.025, na.rm = TRUE)),
+             hi = unname(quantile(rs, 0.975, na.rm = TRUE)))
+}
+
+cor_summary <- bind_rows(lapply(predictors, function(p) {
+  res <- boot_r(power_table[[p]], power_table$response_egenes)
+  res$predictor <- p
+  res
+})) %>%
+  mutate(label = pred_labels[predictor],
+         side  = ifelse(grepl("^ctrl", predictor), "Control", "Treatment")) %>%
+  arrange(desc(abs(r))) %>%
+  mutate(label = factor(label, levels = rev(label)))
+
+p_forest <- ggplot(cor_summary, aes(x = r, y = label, color = side)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey60") +
+  geom_pointrange(aes(xmin = lo, xmax = hi), size = 0.7) +
+  scale_color_manual(values = c("Control" = "#C0392B", "Treatment" = "#2C7BB6")) +
+  coord_cartesian(xlim = c(-0.5, 0.8)) +
+  theme_classic(base_size = 13) +
+  labs(x = "Pearson r (95% bootstrap CI)",
+       y = NULL, color = NULL,
+       title = "A. Power proxies vs response eQTL count") +
+  theme(legend.position = "top")
+
+# Cell-type-level scatter (response vs control standard eQTLs)
+scatter_data <- power_table %>%
+  group_by(celltype) %>%
+  summarise(response_egenes_mean = mean(response_egenes),
+            ctrl_std = first(ctrl_std), .groups = "drop") %>%
+  mutate(label = gsub("_", " ", celltype))
+
+r_scatter <- cor(scatter_data$ctrl_std, scatter_data$response_egenes_mean)
+
+p_scatter <- ggplot(scatter_data,
+                    aes(x = ctrl_std, y = response_egenes_mean)) +
+  geom_smooth(method = "lm", se = TRUE, color = "grey40",
+              fill = "grey85", linewidth = 0.6) +
+  geom_point(size = 2.5, alpha = 0.8, color = "#2C3E50") +
+  ggrepel::geom_text_repel(aes(label = label),
+                            size = 2.8, max.overlaps = Inf,
+                            box.padding = 0.4, segment.color = "grey60") +
+  annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.8,
+           label = sprintf("r = %.2f", r_scatter),
+           size = 4, color = "grey20") +
+  theme_classic(base_size = 13) +
+  labs(x = "Control standard eQTLs",
+       y = "Mean response eQTLs per cell type (across 5 drugs)",
+       title = "B. Per cell type: response vs control standard eQTL count")
+
+p_power_summary <- p_forest + p_scatter + plot_layout(widths = c(1, 1.3))
+
+ggsave(file.path(plot_dir, "power_check_summary.pdf"),
+       p_power_summary, width = 13, height = 5.5)
+
+p_power_summary
+```
+
+
+# Option 2: variance partitioning + residual heatmap
+```{r power_variance_partition}
+# Marginal R^2 — predictor alone
+marginal_r2 <- sapply(predictors, function(p) {
+  cor(power_table[[p]], power_table$response_egenes, use = "complete.obs")^2
+})
+
+# Full multivariate model
+fmla_full <- as.formula(paste("response_egenes ~", paste(predictors, collapse = " + ")))
+m_full <- lm(fmla_full, data = power_table)
+r2_full <- summary(m_full)$r.squared
+
+# Unique R^2 = full model R^2 − leave-one-out R^2
+unique_r2 <- sapply(predictors, function(p) {
+  others <- setdiff(predictors, p)
+  fmla   <- as.formula(paste("response_egenes ~", paste(others, collapse = " + ")))
+  r2_full - summary(lm(fmla, data = power_table))$r.squared
+})
+
+varexp_long <- tibble(
+  predictor = predictors,
+  Marginal  = marginal_r2,
+  Unique    = unique_r2
+) %>%
+  mutate(label = pred_labels[predictor],
+         side  = ifelse(grepl("^ctrl", predictor), "Control", "Treatment")) %>%
+  pivot_longer(c(Marginal, Unique), names_to = "type", values_to = "r2") %>%
+  mutate(type = factor(type, levels = c("Marginal", "Unique"),
+                       labels = c("Marginal R² (alone)",
+                                   "Unique R² (added to others)")))
+
+ord <- varexp_long %>%
+  filter(type == "Marginal R² (alone)") %>%
+  arrange(desc(r2)) %>% pull(label)
+varexp_long$label <- factor(varexp_long$label, levels = rev(ord))
+
+p_varexp <- ggplot(varexp_long, aes(x = r2, y = label, fill = side)) +
+  geom_col() +
+  scale_fill_manual(values = c("Control" = "#C0392B", "Treatment" = "#2C7BB6")) +
+  facet_wrap(~ type, scales = "free_x") +
+  theme_classic(base_size = 13) +
+  labs(x = expression(R^2), y = NULL, fill = NULL,
+       title = sprintf("A. Variance explained (full model R² = %.2f)",
+                       r2_full)) +
+  theme(legend.position = "top")
+
+# Residuals from full multivariate model
+power_table_resid <- power_table %>%
+  mutate(predicted = predict(m_full, newdata = .),
+         residual  = response_egenes - predicted)
+
+ct_order_resid <- power_table_resid %>%
+  group_by(celltype) %>%
+  summarise(mean_resid = mean(residual), .groups = "drop") %>%
+  arrange(mean_resid) %>%
+  pull(celltype)
+
+residual_heat <- power_table_resid %>%
+  mutate(celltype  = factor(gsub("_", " ", celltype),
+                            levels = gsub("_", " ", ct_order_resid)),
+         treatment = factor(treatment,
+                            levels = c("Ale", "Bri", "Cer", "Cri", "Lor")))
+
+resid_lim <- max(abs(residual_heat$residual))
+
+p_resid <- ggplot(residual_heat,
+                  aes(x = treatment, y = celltype, fill = residual)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  scale_fill_gradient2(low = "#2C7BB6", mid = "white", high = "#C0392B",
+                        midpoint = 0, limits = c(-resid_lim, resid_lim),
+                        name = "Residual\n(obs − pred)") +
+  theme_minimal(base_size = 13) +
+  theme(panel.grid = element_blank(),
+        axis.text.y = element_text(size = 10)) +
+  labs(x = "Treatment", y = NULL,
+       title = "B. Response eQTLs beyond joint power model")
+
+p_varexp_summary <- p_varexp + p_resid + plot_layout(widths = c(1, 1.1))
+
+ggsave(file.path(plot_dir, "power_variance_partition.pdf"),
+       p_varexp_summary, width = 14, height = 6)
+
+p_varexp_summary
+```
+
+
+# Supplementary table: per-condition power and eQTL counts
+```{r supp_table_per_condition_power}
+# One row per cell type x treatment condition with:
+#   treatment-side and control-side power proxies (donors, cells, standard eQTLs)
+#   response eQTL count for that condition
+supp_per_cond <- power_table %>%
+  dplyr::select(
+    celltype, treatment,
+    treat_donors, treat_cells, treat_std_eqtls = treat_std,
+    ctrl_donors,  ctrl_cells,  ctrl_std_eqtls  = ctrl_std,
+    response_eqtls = response_egenes
+  ) %>%
+  arrange(celltype, treatment) %>%
+  mutate(celltype = gsub("_", " ", celltype))
+
+write_tsv(
+  supp_per_cond,
+  file.path(results_dir, "lfc3", "supp_table_per_condition_power_and_eqtls.tsv")
+)
+
+cat("Per-condition supplementary table:", nrow(supp_per_cond), "rows\n")
+head(supp_per_cond)
+```
+
+
+# Upset plot: overlap of response eQTLs across drugs
+```{r response_upset}
+# Collapse across cell types: a gene_snp is responsive to drug X if responsive in at least one cell type for that drug
+drug_sets <- treatment_responsive_df %>%
+  distinct(gene_snp, treatment) %>%
+  group_by(treatment) %>%
+  summarise(gene_snps = list(gene_snp), .groups = "drop")
+
+set_list <- setNames(drug_sets$gene_snps, drug_sets$treatment)
+
+m <- make_comb_mat(set_list)
+
+# Order bars by size descending
+m <- m[comb_size(m) > 0]
+
+p_upset <- UpSet(
+  m,
+  set_order    = c("Ale", "Bri", "Cer", "Cri", "Lor"),
+  comb_order   = order(comb_size(m), decreasing = TRUE),
+  top_annotation = upset_top_annotation(m, add_numbers = TRUE),
+  left_annotation = upset_left_annotation(m, add_numbers = TRUE),
+  row_names_gp = gpar(fontsize = 12)
+)
+
+plot_dir <- file.path(results_dir, paste0("lfc", lfc), "plots")
+pdf(file.path(plot_dir, "response_eqtl_upset.pdf"), width = 10, height = 5)
+draw(p_upset)
+dev.off()
+
+draw(p_upset)
+
+treatment_responsive_df %>%
+  distinct(gene_snp, treatment) %>%
+  group_by(gene_snp) %>%
+  summarise(n_treatments = n_distinct(treatment), .groups = "drop") %>%
+  filter(n_treatments == 5) %>%
+  nrow()
+
+```
+
+
+# Summary: treatment-responsive eQTLs by cell type
+```{r responsive_by_celltype}
+for (lfc in lfc_factors) {
+  summarize_treatment_responsive_by_celltype(results_dir, lfc)
+}
+```
+
+# Make supplemental tables with all eQTLs and response eQTLs
+```{r}
+#  Reshape mash results to long (one row per gene_snp × condition)
+mash_long <- combined_mash_results %>%
+  pivot_longer(
+    cols = -c(gene, gene_snp),
+    names_to = c("condition", ".value"),
+    names_pattern = "(.+)_(lfsr|beta|sd)$"
+  ) %>%
+  mutate(
+    treatment = sub(".*_", "", condition),
+    celltype  = sub("_(Control|Ale|Bri|Cer|Cri|Lor)$", "", condition),
+    snp       = sub("^[^_]+_", "", gene_snp)
+  )
+
+# Supplemental Table 1: all significant eQTLs (lfsr < 0.05 in any condition)
+all_sig_eqtls <- mash_long %>%
+  filter(lfsr < lfsr_thresh) %>%
+  dplyr::select(gene, snp, gene_snp, celltype, treatment, beta, sd, lfsr) %>%
+  arrange(lfsr)
+
+write_tsv(all_sig_eqtls,
+          file.path(results_dir, "supp_table_all_significant_eqtls.tsv"))
+
+cat("All significant eQTLs:\n")
+cat("  Rows (gene_snp × condition):", nrow(all_sig_eqtls), "\n")
+cat("  Unique gene_snp:",  n_distinct(all_sig_eqtls$gene_snp), "\n")
+cat("  Unique eGenes:",    n_distinct(all_sig_eqtls$gene), "\n")
+
+# Supplemental Table 2: response eQTLs with treatment + control stats 
+# Treatment-condition stats keyed on (gene_snp, celltype, treatment)
+treat_stats <- mash_long %>%
+  filter(treatment != "Control") %>%
+  dplyr::select(gene_snp, celltype, treatment,
+                beta_treat = beta, sd_treat = sd, lfsr_treat = lfsr)
+
+# Control-condition stats keyed on (gene_snp, celltype)
+control_stats <- mash_long %>%
+  filter(treatment == "Control") %>%
+  dplyr::select(gene_snp, celltype,
+                beta_control = beta, sd_control = sd, lfsr_control = lfsr)
+
+response_supp <- treatment_responsive_df %>%
+  mutate(snp = sub("^[^_]+_", "", gene_snp)) %>%
+  left_join(treat_stats,   by = c("gene_snp", "celltype", "treatment")) %>%
+  left_join(control_stats, by = c("gene_snp", "celltype")) %>%
+  mutate(fold_change = abs(beta_treat) / abs(beta_control)) %>%
+  dplyr::select(gene, snp, gene_snp, celltype, treatment,
+                beta_treat, sd_treat, lfsr_treat,
+                beta_control, sd_control, lfsr_control,
+                fold_change) %>%
+  arrange(celltype, treatment, lfsr_treat)
+
+write_tsv(response_supp,
+          file.path(results_dir, "lfc3", "supp_table_response_eqtls.tsv"))
+
+cat("\nResponse eQTLs:\n")
+cat("  Rows (gene_snp × condition):", nrow(response_supp), "\n")
+cat("  Unique gene_snp:",  n_distinct(response_supp$gene_snp), "\n")
+cat("  Unique eGenes:",    n_distinct(response_supp$gene), "\n")
+```
+
+
+# Treatment-specific and cell-type-specific response eQTLs with control betas
+```{r specific_eqtls_with_betas}
+# Specificity: how many cell types / treatments each response eQTL appears in
+responsive_specificity <- treatment_responsive_df %>%
+  group_by(gene_snp, gene) %>%
+  summarise(
+    n_conditions = n(),
+    conditions   = paste(paste0(celltype, "_", treatment), collapse = "; "),
+    n_celltypes  = n_distinct(celltype),
+    n_treatments = n_distinct(treatment),
+    .groups = "drop"
+  )
+
+# Treatment-specific: responsive in only 1 treatment (any number of cell types)
+tx_specific <- responsive_specificity %>%
+  filter(n_treatments == 1) %>%
+  left_join(treatment_responsive_df, by = c("gene_snp", "gene"))
+
+# Cell-type-specific: responsive in only 1 cell type (any number of treatments)
+ct_specific <- responsive_specificity %>%
+  filter(n_celltypes == 1) %>%
+  left_join(treatment_responsive_df, by = c("gene_snp", "gene"))
+
+# Both: responsive in only 1 cell type AND only 1 treatment
+both_specific <- responsive_specificity %>%
+  filter(n_celltypes == 1, n_treatments == 1) %>%
+  left_join(treatment_responsive_df, by = c("gene_snp", "gene"))
+
+# Add control and treatment betas from response_supp
+add_betas <- function(df, supp) {
+  df %>%
+    left_join(
+      supp %>% select(gene_snp, celltype, treatment,
+                       beta_treat, sd_treat, lfsr_treat,
+                       beta_control, sd_control, lfsr_control, fold_change),
+      by = c("gene_snp", "celltype", "treatment")
+    ) %>%
+    select(gene_snp, gene, celltype, treatment,
+           beta_treat, sd_treat, lfsr_treat,
+           beta_control, sd_control, lfsr_control,
+           fold_change, n_conditions, conditions, n_celltypes, n_treatments) %>%
+    arrange(desc(abs(beta_treat)))
+}
+
+tx_specific_out   <- add_betas(tx_specific, response_supp)
+ct_specific_out   <- add_betas(ct_specific, response_supp)
+both_specific_out <- add_betas(both_specific, response_supp)
+
+out_dir <- file.path(results_dir, "lfc3")
+write_tsv(tx_specific_out,
+          file.path(out_dir, "treatment_specific_response_eqtls_with_betas.tsv"))
+write_tsv(ct_specific_out,
+          file.path(out_dir, "celltype_specific_response_eqtls_with_betas.tsv"))
+write_tsv(both_specific_out,
+          file.path(out_dir, "celltype_and_treatment_specific_response_eqtls_with_betas.tsv"))
+
+cat("Treatment-specific:", n_distinct(tx_specific_out$gene_snp), "eQTLs,", nrow(tx_specific_out), "rows\n")
+cat("Cell-type-specific:", n_distinct(ct_specific_out$gene_snp), "eQTLs,", nrow(ct_specific_out), "rows\n")
+cat("Both specific:     ", n_distinct(both_specific_out$gene_snp), "eQTLs,", nrow(both_specific_out), "rows\n")
+```
+
+
+# TSS plots: density
+
+```{r tss_density, warning=FALSE}
+for (lfc in lfc_factors) {
+  message("TSS distance density: fold-change ", lfc)
+
+  lfc_celltypes <- read_tsv(
+    file.path(results_dir, paste0("lfc", lfc), "treatment_responsive_eqtls_signfixed.tsv"),
+    show_col_types = FALSE
+  ) %>% pull(celltype) %>% unique()
+
+  plot_dir <- file.path(results_dir, paste0("lfc", lfc), "plots")
+  dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+
+  df_tss <- build_tss_distance_df(
+    mash_folder   = results_dir,
+    lfc           = lfc,
+    gene_loc_file = gene_loc_file,
+    celltypes     = lfc_celltypes
+  )
+
+  plot_tss_density(df_tss, lfc, results_dir, maf = 0.05, cisdist = "100kb")
+}
+```
+
+
+# TSS distance: aggregate (pooled across all cell types and treatments)
+```{r tss_density_aggregate, warning=FALSE}
+lfc <- 3
+
+lfc_celltypes <- read_tsv(
+  file.path(results_dir, paste0("lfc", lfc), "treatment_responsive_eqtls_signfixed.tsv"),
+  show_col_types = FALSE
+) %>% pull(celltype) %>% unique()
+
+df_tss_lfc <- build_tss_distance_df(
+  mash_folder   = results_dir,
+  lfc           = lfc,
+  gene_loc_file = gene_loc_file,
+  celltypes     = lfc_celltypes
+)
+
+p_tss_aggregate <- ggplot(df_tss_lfc, aes(x = distance / 1000, fill = source, color = source)) +
+  geom_histogram(
+    aes(y = after_stat(density)),
+    position = "identity", bins = 50, alpha = 0.15, linewidth = 0.2
+  ) +
+  geom_density(linewidth = 0.8, bounds = c(-100, 100), alpha = 0) +
+  scale_fill_manual(values  = c("Response" = "#f53224", "Non-response" = "#619CFF")) +
+  scale_color_manual(values = c("Response" = "#f53224", "Non-response" = "#619CFF")) +
+  coord_cartesian(xlim = c(-100, 100)) +
+  theme_classic(base_size = 14) +
+  theme(legend.position = "bottom") +
+  labs(
+    x     = "Distance to TSS (Kb)",
+    y     = "Density",
+    fill  = NULL,
+    color = NULL,
+    title = paste0("Distance to TSS: all conditions pooled (fold change ≥ ", lfc, ")")
+  )
+
+plot_dir <- file.path(results_dir, paste0("lfc", lfc), "plots")
+ggsave(file.path(plot_dir, "tss_distance_aggregate.pdf"),
+       p_tss_aggregate, width = 6, height = 4)
+
+p_tss_aggregate
+
+```
+
+
+# ALK expression per cell type vs. response eQTL counts
+# Sanity check whether baseline ALK expression predicts response eQTL discovery.
+```{r alk_expression_vs_response}
+# Source: pseudobulk logCPM matrices written for MatrixEQTL input
+logcpm_dir_treat <- "/project/gilad/geena/publication_clean/matrixeqtl_input/treatment/pseudobulk_15cells_20indiv_summary/normalized_celltypes_medianUMI1/logcpm"
+logcpm_dir_ctrl  <- "/project/gilad/geena/publication_clean/matrixeqtl_input/control/pseudobulk_15cells_1indiv_summary/normalized_celltypes_medianUMI1/logcpm"
+
+# 21 cell types used for eQTL (the intersection between treatment and control)
+eqtl_celltypes <- c(
+  "Bronchiolar and alveolar epithelial cells", "Cardiac mesoderm cells",
+  "Ciliated epithelial cells", "Early mesoderm cells", "ENS glia",
+  "Epicardial fat cells", "Glioblast", "Goblet cells", "Hepatoblasts",
+  "iPSCs", "Metanephric cells", "Neuroblast", "Neuron", "Neuronal IPC",
+  "Radial glia", "Retinal neurons", "Retinal pigment cells",
+  "Retinal progenitors and Muller glia", "Squamous epithelial cells",
+  "Stromal cells", "Vascular endothelial cells"
+)
+
+# Helper: pull a single gene's row (logCPM across all pseudobulk samples) per cell type
+extract_gene_logcpm <- function(dir, eqtl_celltypes, gene = "ALK") {
+  files <- list.files(dir, pattern = "_all_postqc_tmm_logcpm\\.txt$", full.names = TRUE)
+  out <- list()
+  for (f in files) {
+    ct <- sub("_all_postqc_tmm_logcpm\\.txt$", "", basename(f))
+    if (!(ct %in% eqtl_celltypes)) next
+    hdr  <- scan(f, what = "character", nlines = 1, sep = "\t", quiet = TRUE)
+    line <- system(paste0("grep -m1 '^", gene, "\\b' '", f, "'"), intern = TRUE)
+    if (length(line) == 0) next
+    vals <- strsplit(line, "\t")[[1]]
+    out[[ct]] <- tibble(cell_type = ct, sample = hdr[-1],
+                        logcpm    = as.numeric(vals[-1]))
+  }
+  bind_rows(out)
+}
+
+alk_t <- extract_gene_logcpm(logcpm_dir_treat, eqtl_celltypes, gene = "ALK") %>%
+  mutate(treatment  = sub(".*_", "", sample),
+         individual = sub("_[^_]*$", "", sample))
+alk_c <- extract_gene_logcpm(logcpm_dir_ctrl,  eqtl_celltypes, gene = "ALK") %>%
+  mutate(treatment = "Control")
+
+# Per-cell-type summary
+alk_t_summary <- alk_t %>%
+  group_by(cell_type) %>%
+  summarise(n_samples_treat   = n(),
+            mean_logcpm_treat   = round(mean(logcpm),   2),
+            median_logcpm_treat = round(median(logcpm), 2),
+            min_logcpm_treat    = round(min(logcpm),    2),
+            max_logcpm_treat    = round(max(logcpm),    2),
+            .groups = "drop")
+
+alk_c_summary <- alk_c %>%
+  group_by(cell_type) %>%
+  summarise(n_samples_ctrl   = n(),
+            mean_logcpm_ctrl   = round(mean(logcpm),   2),
+            median_logcpm_ctrl = round(median(logcpm), 2),
+            .groups = "drop")
+
+# Per (cell type × condition) summary — ALK expression broken out by drug
+alk_per_condition <- bind_rows(
+  alk_t %>% select(cell_type, treatment, logcpm),
+  alk_c %>% select(cell_type, treatment, logcpm)
+) %>%
+  group_by(cell_type, treatment) %>%
+  summarise(n_samples     = n(),
+            mean_logcpm   = round(mean(logcpm),   2),
+            median_logcpm = round(median(logcpm), 2),
+            min_logcpm    = round(min(logcpm),    2),
+            max_logcpm    = round(max(logcpm),    2),
+            .groups = "drop")
+
+# Wide table: cell type × treatment with median ALK logCPM
+alk_per_condition_wide <- alk_per_condition %>%
+  select(cell_type, treatment, median_logcpm) %>%
+  pivot_wider(names_from = treatment, values_from = median_logcpm) %>%
+  select(cell_type, any_of(c("Control", "Ale", "Bri", "Cer", "Cri", "Lor"))) %>%
+  arrange(desc(rowMeans(across(any_of(c("Ale","Bri","Cer","Cri","Lor"))), na.rm = TRUE)))
+
+cat("\nMedian ALK logCPM per (cell type × condition):\n")
+print(as.data.frame(alk_per_condition_wide))
+
+# Does ALK expression itself shift with treatment?
+# Test per cell type whether any treatment differs from the other treatments.
+alk_shift <- alk_t %>%
+  group_by(cell_type, treatment) %>%
+  summarise(median_logcpm = median(logcpm), .groups = "drop") %>%
+  group_by(cell_type) %>%
+  summarise(median_min_treat = round(min(median_logcpm), 2),
+            median_max_treat = round(max(median_logcpm), 2),
+            spread_logcpm    = round(max(median_logcpm) - min(median_logcpm), 2),
+            .groups = "drop") %>%
+  arrange(desc(spread_logcpm))
+
+cat("\nSpread in median ALK across 5 drugs within each cell type (sanity check):\n")
+print(as.data.frame(alk_shift))
+
+write.csv(alk_per_condition,
+          file.path(results_dir, "lfc3", "alk_expression_per_condition_long.csv"),
+          row.names = FALSE)
+write.csv(alk_per_condition_wide,
+          file.path(results_dir, "lfc3", "alk_expression_per_condition_wide.csv"),
+          row.names = FALSE)
+
+alk_summary <- alk_t_summary %>%
+  left_join(alk_c_summary, by = "cell_type") %>%
+  arrange(desc(median_logcpm_treat))
+
+print(alk_summary, n = Inf)
+
+# Join with response eQTL counts (per cell type, unique gene_snp at lfc3)
+# treatment_responsive_df was loaded above in the responsive_counts chunk.
+response_per_ct <- treatment_responsive_df %>%
+  mutate(cell_type = gsub("_", " ", celltype)) %>%
+  group_by(cell_type) %>%
+  summarise(n_response_eqtls = n_distinct(gene_snp), .groups = "drop")
+
+alk_vs_response <- alk_summary %>%
+  left_join(response_per_ct, by = "cell_type")
+
+cat("\nALK expression vs response eQTL count per cell type:\n")
+print(alk_vs_response %>%
+        select(cell_type, median_logcpm_treat, median_logcpm_ctrl, n_response_eqtls),
+      n = Inf)
+
+# Correlations between ALK expression and response eQTL count
+cor_treat_spearman <- with(alk_vs_response,
+  cor.test(median_logcpm_treat, n_response_eqtls, method = "spearman"))
+cor_ctrl_spearman <- with(alk_vs_response,
+  cor.test(median_logcpm_ctrl,  n_response_eqtls, method = "spearman"))
+
+cat(sprintf("\nSpearman rho (median ALK logCPM treat vs response eQTL count): %.3f (P = %.3g)\n",
+            cor_treat_spearman$estimate, cor_treat_spearman$p.value))
+cat(sprintf("Spearman rho (median ALK logCPM ctrl  vs response eQTL count): %.3f (P = %.3g)\n",
+            cor_ctrl_spearman$estimate,  cor_ctrl_spearman$p.value))
+
+# Scatter plot
+p_alk <- ggplot(alk_vs_response,
+                aes(x = median_logcpm_treat, y = n_response_eqtls, label = cell_type)) +
+  geom_point(size = 3, alpha = 0.8) +
+  ggrepel::geom_text_repel(size = 3, max.overlaps = Inf) +
+  theme_classic(base_size = 14) +
+  labs(x = "Median ALK logCPM (treatment pseudobulk)",
+       y = "Number of response eQTLs (lfsr<0.05; fold change ≥ 3)",
+       title = sprintf("ALK expression vs response eQTL count (Spearman rho = %.2f)",
+                       cor_treat_spearman$estimate))
+
+ggsave(file.path(results_dir, "lfc3", "plots", "alk_expression_vs_response_eqtls.pdf"),
+       p_alk, width = 7, height = 5)
+print(p_alk)
+
+# Save tables
+write.csv(alk_summary,
+          "/project/gilad/geena/publication_clean/results/treatment/alk_expression_per_celltype.csv",
+          row.names = FALSE)
+write.csv(alk_vs_response,
+          file.path(results_dir, "lfc3", "alk_expression_vs_response_eqtls.csv"),
+          row.names = FALSE)
+```

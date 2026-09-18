@@ -1,0 +1,186 @@
+---
+title: "Mash DE-count summary: ALK 1-vs-4"
+author: "Elizabeth Geena Woo"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    df_print: paged
+    code_folding: hide
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+.libPaths(c("/project/gilad/geena/Rlibs/R-4.4.1", .libPaths()))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 10, fig.height = 5)
+library(mashr)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(readr)
+library(tibble)
+library(pheatmap)
+library(RColorBrewer)
+
+results_root <- "/project/gilad/geena/publication_clean/results/treatment"
+mash_root <- file.path(results_root, "dreamlet_mash")
+
+drugs <- c("Ale", "Bri", "Cer", "Cri", "Lor")
+lfsr_cut <- 0.05
+```
+
+## Context
+
+Diagnostic overview of the per-drug mash outputs (produced by `02_run_mash.R`).
+Two things per drug: (1) how many DE genes per cell type, and (2) how the
+breadth (K = number of cell types where the gene is DE) is distributed. Both
+are useful sanity checks before writing supp tables or figures downstream --
+none of the CSVs written here are consumed by other scripts in this repo,
+so this notebook is safe to skip if the mash outputs already look right.
+
+## Section 1 — Load and long-format the mash results
+
+Wide matrices (14,918 genes x 30 cell types per drug) get pivoted to a long
+tibble with one row per (drug, cell type, gene). NA cells (untestable in
+the dreamlet fit) are dropped. `is_de = lfsr < 0.05`; `direction = sign(PM)`
+on the DE subset.
+
+```{r load-long}
+load_wide_matrix <- function(drug, filename) {
+  f <- file.path(mash_root, paste0("by_drug_", drug), filename)
+  df <- read_csv(f, show_col_types = FALSE, progress = FALSE)
+  # First column is the unnamed row-name column from write.csv; rename to gene.
+  names(df)[1] <- "gene"
+  df
+}
+
+pivot_mash <- function(drug) {
+  lfsr <- load_wide_matrix(drug, "mash_lfsr.csv") %>%
+    pivot_longer(-gene, names_to = "cell_type", values_to = "lfsr")
+  pm <- load_wide_matrix(drug, "mash_pm.csv") %>%
+    pivot_longer(-gene, names_to = "cell_type", values_to = "PM")
+  lfc <- load_wide_matrix(drug, "logFC_original.csv") %>%
+    pivot_longer(-gene, names_to = "cell_type", values_to = "logFC_original")
+  lfsr %>%
+    inner_join(pm, by = c("gene", "cell_type")) %>%
+    inner_join(lfc, by = c("gene", "cell_type")) %>%
+    mutate(drug = drug)
+}
+
+de_long <- map_dfr(drugs, pivot_mash) %>%
+  filter(!is.na(lfsr)) %>%
+  mutate(is_de = lfsr < lfsr_cut,
+         direction = ifelse(is_de, sign(PM), NA_real_))
+
+cat("de_long:", nrow(de_long),
+    "rows (drug x cell_type x gene, NA cells dropped)\n")
+```
+
+## Section 2 — Per-CT DE counts (per drug)
+
+Post-mash DE counts per cell type: how many DE genes recur in each cell type
+for each drug, and how the up/down split falls.
+
+```{r per-ct}
+per_ct <- de_long %>%
+  group_by(drug, cell_type) %>%
+  summarize(
+    n_de = sum(is_de),
+    n_up = sum(is_de & direction > 0),
+    n_down = sum(is_de & direction < 0),
+    .groups = "drop"
+  )
+
+per_ct_wide <- per_ct %>%
+  select(drug, cell_type, n_de) %>%
+  pivot_wider(names_from = drug, values_from = n_de, values_fill = 0L) %>%
+  arrange(cell_type)
+per_ct_wide
+```
+
+### Heatmap of n_de across cell type x drug
+
+```{r per-ct-heatmap, fig.width=8, fig.height=9}
+mat <- per_ct %>%
+  select(drug, cell_type, n_de) %>%
+  pivot_wider(names_from = drug, values_from = n_de, values_fill = 0L) %>%
+  column_to_rownames("cell_type") %>%
+  as.matrix()
+mat <- mat[, drugs]
+
+pheatmap(mat,
+         color = colorRampPalette(brewer.pal(9, "YlOrRd"))(50),
+         cluster_cols = FALSE, cluster_rows = TRUE,
+         display_numbers = TRUE, number_format = "%d",
+         fontsize_number = 7, fontsize_row = 8, fontsize_col = 10,
+         main = "n DE genes (lfsr<0.05) per cell type x drug",
+         border_color = "white")
+```
+
+## Section 3 — Breadth distribution (per drug)
+
+For each (drug, gene), breadth K = number of cell types where the gene is DE.
+mash is conservative on sharing so the tails of this distribution (K=1
+cell-type-specific, K=30 all-shared) are reliable characterizations of how
+each drug's DE signal is spread across cell types.
+
+```{r breadth}
+breadth <- de_long %>%
+  group_by(drug, gene) %>%
+  summarize(n_ct_tested = n(),
+            K = sum(is_de),
+            .groups = "drop") %>%
+  filter(K >= 1)
+
+classify_breadth <- function(K) {
+  case_when(
+    K == 1 ~ "CT-specific (K=1)",
+    K <= 4 ~ "narrow-shared (2-4)",
+    K <= 14 ~ "moderate-shared (5-14)",
+    K <= 29 ~ "broadly-shared (15-29)",
+    K == 30 ~ "all_shared (30)",
+    TRUE ~ NA_character_
+  )
+}
+
+class_order <- c("CT-specific (K=1)", "narrow-shared (2-4)",
+                 "moderate-shared (5-14)", "broadly-shared (15-29)",
+                 "all_shared (30)")
+breadth <- breadth %>%
+  mutate(class = factor(classify_breadth(K), levels = class_order))
+
+breadth_table <- breadth %>%
+  count(drug, class, name = "n_genes") %>%
+  pivot_wider(names_from = drug, values_from = n_genes, values_fill = 0L) %>%
+  arrange(class)
+breadth_table
+```
+
+### Stacked bar of breadth classes
+
+```{r breadth-bar, fig.width=9, fig.height=5}
+ggplot(breadth %>% count(drug, class, name = "n_genes"),
+       aes(x = drug, y = n_genes, fill = class)) +
+  geom_col() +
+  scale_fill_brewer(palette = "Spectral", direction = -1) +
+  labs(x = "Drug", y = "n genes DE in >=1 cell type",
+       title = "Breadth composition of DE gene sets per drug",
+       fill = "breadth class") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+```
+
+### Full breadth distribution (K = 1 to 30 cell types)
+
+```{r breadth-hist, fig.width=11, fig.height=4}
+ggplot(breadth, aes(x = K)) +
+  geom_histogram(binwidth = 1, boundary = 0.5, fill = "steelblue4") +
+  facet_wrap(~ drug, nrow = 1) +
+  scale_x_continuous(breaks = c(1, 5, 10, 15, 20, 25, 30)) +
+  labs(x = "K = n cell types where gene is DE",
+       y = "n genes",
+       title = "Breadth K distribution per drug") +
+  theme_minimal(base_size = 11)
+```

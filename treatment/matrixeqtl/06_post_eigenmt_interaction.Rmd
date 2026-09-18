@@ -1,0 +1,79 @@
+---
+title: "Post-eigenMT: interaction model significance"
+output: html_document
+date: '2025-07-30'
+---
+
+Count significant G×T interaction eQTLs after eigenMT + BH correction.
+Run after 9b_run_eigenmt_interaction.sh finishes.
+
+```{r setup}
+library(dplyr)
+library(readr)
+library(tidyr)
+
+umi_label <- "medianUMI1"
+eigenmt_dir <- paste0("/project/gilad/geena/publication_clean/results/treatment/",
+                       "matrixeqtl/interaction/", umi_label, "/eigenMT/")
+drugs <- c("Ale", "Bri", "Cer", "Cri", "Lor")
+```
+
+```{r load}
+file_names <- list.files(eigenmt_dir, full.names = FALSE)
+treatment_celltypes <- unique(sub("_chr[0-9]+_interact_cis\\.txt$", "", file_names))
+cat("Conditions found:", length(treatment_celltypes), "\n")
+
+combine_chrs <- function(tc, dir) {
+  bind_rows(lapply(1:22, function(chr) {
+    f <- file.path(dir, paste0(tc, "_chr", chr, "_interact_cis.txt"))
+    if (!file.exists(f)) return(NULL)
+    df <- tryCatch(read_tsv(f, show_col_types = FALSE),
+                   error = function(e) NULL)
+    if (is.null(df) || nrow(df) == 0) return(NULL)
+    df$treatment_celltype <- tc
+    df
+  }))
+}
+
+all_results <- bind_rows(lapply(treatment_celltypes, combine_chrs, dir = eigenmt_dir))
+cat("Total gene-best rows loaded:", nrow(all_results), "\n")
+```
+
+```{r correct}
+# BH within each treatment × cell type; drug is the first token before first underscore
+all_results <- all_results %>%
+  mutate(drug = sub("^([^_]+)_.*", "\\1", treatment_celltype)) %>%
+  group_by(treatment_celltype) %>%
+  mutate(BH = p.adjust(BF, method = "BH")) %>%
+  ungroup()
+
+sig <- all_results %>% filter(BH < 0.05)
+```
+
+```{r summarise}
+cat("FDR < 0.05\n")
+cat("Significant condition-SNP-gene rows:", nrow(sig), "\n")
+cat("Unique SNP-gene pairs (across conditions):", nrow(distinct(sig, snps, gene)), "\n")
+cat("Unique eGenes:", n_distinct(sig$gene), "\n")
+
+cat("\nPer drug:\n")
+sig %>%
+  group_by(drug) %>%
+  summarise(n_pairs = n(), n_genes = n_distinct(gene)) %>%
+  print()
+
+cat("\nPer condition (treatment × cell type):\n")
+sig %>%
+  group_by(treatment_celltype) %>%
+  summarise(n = n()) %>%
+  arrange(desc(n)) %>%
+  print(n = 50)
+```
+
+```{r save}
+out_dir <- file.path(dirname(eigenmt_dir), "eigenMT_summary")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+write_tsv(all_results, file.path(out_dir, paste0("all_results_posteigenMT_BH_", umi_label, ".tsv")))
+write_tsv(sig, file.path(out_dir, paste0("sig_fdr05_interaction_", umi_label, ".tsv")))
+cat("Saved to:", out_dir, "\n")
+```
