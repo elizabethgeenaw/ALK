@@ -4,9 +4,6 @@ output: html_document
 date: '2025-07-28'
 ---
 
-**Must be run on midway-l16b-31 (R/4.2.0).** PCAForQTL (runElbow, filterKnownCovariates)
-is not compatible with R/4.4.1.
-
 Prepare combined treatment + control pseudobulk expression and covariate files for
 genotype × treatment interaction mapping with MatrixEQTL (modelLINEAR_CROSS).
 Produces two medianUMI threshold versions: medianUMI1 (matching the main eQTL
