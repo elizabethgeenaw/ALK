@@ -1,6 +1,4 @@
-# ---- V4 outputs ----
 # Main Fig 1B: /project/gilad/geena/ALK_draft/V4/Figures/1B_umap.pdf (sketch-based UMAP of 850K cells)
-# --------------------
 
 library(BPCells)
 library(Seurat)
