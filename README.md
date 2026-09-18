@@ -8,7 +8,7 @@ ALK_paper_code/
 │   ├── preprocessing/              # 01–05  QC, annotation, UMAP (Fig 1, Supp S1, Supp Tables S2–S4)
 │   ├── differential_expression/
 │   │   ├── dreamlet/               # 01–05 analysis + fig2A/B/S2, fig2C, fig2D, supp_S3–S6
-│   │   └── cormotif/               # 01–04 analysis + fig3A, fig3B_3C_refresh, fig3B_lor, supp_S8
+│   │   └── cormotif/               # 01–04 analysis + fig3A, supp_S8
 │   └── matrixeqtl/                 # 01–06 pipeline + supp_S14_interaction_concordance
 ├── control/                        # 01–05 control HDC pipeline (feeds joint mash)
 ├── fastqtl2mash/                   # 01–03 reformat MatrixEQTL output for mash
