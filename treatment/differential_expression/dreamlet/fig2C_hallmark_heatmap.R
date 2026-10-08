@@ -4,9 +4,16 @@
 # results across drugs. For each drug we take the top-N Hallmark pathways
 # ranked by mean absolute NES across cell types (an objective, data-driven
 # selection with no manual curation), take the union across drugs as the
-# heatmap rows, and plot the drug-by-pathway mean-NES matrix with the
-# rows clustered. Stars mark pathways significant in a large majority of the
-# 30 tested cell types (single star: 15/30, double star: 25/30).
+# heatmap rows, and plot the drug-by-pathway mean-NES matrix. Drugs are
+# ordered Ale/Bri/Cri | Cer/Lor with a visible column gap between the two
+# groups, so the reader can scan the two-group transcriptional pattern
+# (positive on the left, negative on the right) directly. Pathways are
+# partitioned into two row blocks: an upper block of gene sets that follow
+# the two-group pattern (mean NES > 0 for Ale/Bri/Cri and < 0 for Cer/Lor,
+# significant in >= 15 CTs in >= 4 of the 5 drugs) and a lower block of
+# the remaining selected pathways. Stars mark pathways significant in a
+# large majority of the 30 tested cell types (single star: 15/30,
+# double star: all 30/30).
 
 # Input:
 #   results/treatment/dreamlet_mash/gsea/dreamlet_mash_gsea.tsv
@@ -23,7 +30,10 @@ library(data.table)
 
 # Parameters
 fdr_threshold <- 0.05
-drug_order <- c("Ale", "Bri", "Cer", "Cri", "Lor")
+# Column order places the two drug groups adjacent (Ale/Bri/Cri on the left,
+# Cer/Lor on the right); a visible gap is drawn between them by column_split.
+drug_order <- c("Ale", "Bri", "Cri", "Cer", "Lor")
+drug_group <- c(Ale = "A", Bri = "A", Cri = "A", Cer = "B", Lor = "B")
 
 # Number of Hallmark pathways to take from each drug (per-drug top-N by
 # |mean NES|). Their union becomes the heatmap rows.
@@ -34,10 +44,10 @@ top_n_hallmark_per_drug <- 8
 min_n_sig_for_selection <- 3
 
 # Cell-type breadth thresholds used to draw stars on top of heatmap cells.
-# Interpretation: "sig in majority" (>=15/30 CTs) gets one star; "sig in
-# almost all" (>=25/30 CTs) gets two stars.
+# Interpretation: "sig in majority" (>=15/30 CTs) gets one star; "sig in all
+# 30 CTs" gets two stars.
 min_n_sig_for_star <- 15
-min_n_sig_for_star_strong <- 25
+min_n_sig_for_star_strong <- 30
 
 # Paths
 base_dir <- "/project/gilad/geena/publication_clean"
@@ -90,6 +100,27 @@ build_hallmark_matrix <- function(pathway_set) {
 }
 mat_h <- build_hallmark_matrix(selected_pathways)
 
+# Row partition: upper block = pathways with the two-group pattern (mean NES
+# > 0 for Ale/Bri/Cri AND < 0 for Cer/Lor, significant in >= min_n_sig_for_star
+# cell types in >= 4 of the 5 drugs); lower block = the rest of the selected
+# pathways. Driven by the per (drug, pathway) summary already in hallmark_summary.
+classify_row_block <- function(pathway_set) {
+  grp_wide <- hallmark_summary %>%
+    filter(pathway %in% pathway_set) %>%
+    select(drug, pathway, mean_nes, n_sig) %>%
+    mutate(group = unname(drug_group[as.character(drug)]))
+  block <- vapply(pathway_set, function(pw) {
+    d <- grp_wide[grp_wide$pathway == pw, ]
+    pos_a <- all(d$mean_nes[d$group == "A"] > 0, na.rm = TRUE)
+    neg_b <- all(d$mean_nes[d$group == "B"] < 0, na.rm = TRUE)
+    n_drugs_sig <- sum(d$n_sig >= min_n_sig_for_star, na.rm = TRUE)
+    if (pos_a && neg_b && n_drugs_sig >= 4L) "Two-group pattern"
+    else "Other selected"
+  }, character(1))
+  factor(block, levels = c("Two-group pattern", "Other selected"))
+}
+row_blocks <- classify_row_block(rownames(mat_h))
+
 # Turn HALLMARK_TERM_LIKE_THIS into a readable "Term Like This" row label.
 row_labels <- rownames(mat_h) %>%
   sub("^HALLMARK_", "", .) %>%
@@ -123,6 +154,12 @@ col_fun <- colorRamp2(c(-max_val, 0, max_val),
 ht <- Heatmap(
   mat_h, col = col_fun, name = "Mean NES", row_labels = row_labels,
   cluster_rows = TRUE, cluster_columns = FALSE,
+  row_split = row_blocks,
+  column_split = factor(drug_group[drug_order], levels = c("A", "B")),
+  column_gap = unit(2, "mm"),
+  row_title_gp = gpar(fontsize = 9),
+  column_title_gp = gpar(fontsize = 10, fontface = "italic"),
+  row_gap = unit(1.5, "mm"),
   column_names_gp = gpar(fontsize = 9), row_names_gp = gpar(fontsize = 7.5),
   cell_fun = function(j, i, x, y, width, height, fill) {
     if (nchar(star_mat[i, j]) > 0)
@@ -131,8 +168,7 @@ ht <- Heatmap(
   },
   heatmap_legend_param = list(title_gp = gpar(fontsize = 8),
                               labels_gp = gpar(fontsize = 7)),
-  column_title = "Hallmark",
-  column_title_gp = gpar(fontsize = 10, fontface = "italic")
+  column_title = c("Ale / Bri / Cri", "Cer / Lor")
 )
 
 # Write PDF + PNG side by side (same heatmap, two formats for the manuscript).

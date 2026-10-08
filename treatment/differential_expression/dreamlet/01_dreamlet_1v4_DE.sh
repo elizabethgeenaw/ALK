@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=dreamlet_proteincoding
+#SBATCH --job-name=dreamlet_1v4_DE
 #SBATCH --account=pi-gilad
 #SBATCH --partition=gilad-hm
 #SBATCH --nodes=1
@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem-per-cpu=200G
 #SBATCH --time=48:00:00
-#SBATCH --output=/project/gilad/geena/publication_clean/code/treatment/differential_expression/logs/dreamlet_proteincoding-%j.out
-#SBATCH --error=/project/gilad/geena/publication_clean/code/treatment/differential_expression/logs/dreamlet_proteincoding-%j.err
+#SBATCH --output=/project/gilad/geena/publication_clean/code/treatment/differential_expression/logs/dreamlet_1v4_DE-%j.out
+#SBATCH --error=/project/gilad/geena/publication_clean/code/treatment/differential_expression/logs/dreamlet_1v4_DE-%j.err
 
 module load gsl/2.7
 module load R/4.4.1

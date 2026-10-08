@@ -9,7 +9,7 @@
 
 library(ggplot2)
 
-output_base_dir <- "/project/gilad/geena/publication_clean/results/treatment/cormotif/proteincoding_newfilter_15cells_4arm"
+output_base_dir <- "/project/gilad/geena/publication_clean/results/treatment/cormotif/cormotif_15cells_4arm"
 
 # The 10 pairwise comparisons in the fit's canonical order, and the drug on
 # each side of each comparison. drug_colors is the per-drug palette shared

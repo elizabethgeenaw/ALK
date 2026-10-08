@@ -28,7 +28,7 @@
 # MARCH1/SEPT1/DEC1/OCT1 to dates).
 
 # Inputs:
-#   results/treatment/dreamlet_clean_proteincoding/top_all_1v4.csv
+#   results/treatment/dreamlet_1v4_DE/top_all_1v4.csv
 #   results/treatment/dreamlet_mash/by_drug_{Ale,Bri,Cer,Cri,Lor}/{mash_pm.csv, mash_lfsr.csv, logFC_original.csv}
 
 # Outputs (written to results/treatment/dreamlet_mash/regen_v4/):
@@ -45,7 +45,7 @@ library(openxlsx)
 
 # Paths
 results_dir <- "/project/gilad/geena/publication_clean/results/treatment"
-dreamlet_dir <- file.path(results_dir, "dreamlet_clean_proteincoding")
+dreamlet_dir <- file.path(results_dir, "dreamlet_1v4_DE")
 mash_dir <- file.path(results_dir, "dreamlet_mash")
 
 # Write into a regen_v4 subdir so re-runs don't clobber the V4-referenced

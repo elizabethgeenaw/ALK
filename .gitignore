@@ -35,3 +35,6 @@ RENAME*.sh
 BACKUP*.sh
 TEST_RERUN*.sh
 DRAFT_*.md
+
+# Local-only output-parity checks against ALK_rerun_unified_gene_universe
+tests/

@@ -19,11 +19,11 @@ library(mashr)
 # Called by 02_run_mash_launcher.sh, which submits the 5 per-drug jobs in
 # parallel via 02_run_mash_single.sh.
 
-# Input:  results/treatment/dreamlet_clean_proteincoding/res.dl2_treat (dreamlet fit)
+# Input:  results/treatment/dreamlet_1v4_DE/res.dl2_treat (dreamlet fit)
 # Output: results/treatment/dreamlet_mash/by_drug_<Drug>/*
 
 drugs <- c("Ale", "Bri", "Cer", "Cri", "Lor")
-rds_path <- "/project/gilad/geena/publication_clean/results/treatment/dreamlet_clean_proteincoding/res.dl2_treat"
+rds_path <- "/project/gilad/geena/publication_clean/results/treatment/dreamlet_1v4_DE/res.dl2_treat"
 out_dir <- "/project/gilad/geena/publication_clean/results/treatment/dreamlet_mash"
 
 # Turn a cell-type name into something safe for a directory name (spaces and

@@ -1,5 +1,6 @@
 # Supp Fig S5: S5_fig_supp_full_hallmark_ct_heatmap_all_drugs_stacked.pdf
-# Supp Fig S6 (5 drugs): S6_fig_supp_top_gobp_ct_heatmap_{Ale,Bri,Cer,Cri,Lor}.pdf
+# Supp Fig S7 (5 drugs): S7_fig_supp_top_gobp_ct_heatmap_{Ale,Bri,Cer,Cri,Lor}.pdf
+# (The pre-mash GO:BP companion is Supp Fig S6, built by supp_S5fig_S6_premash.R.)
 
 # Two supplementary heatmaps derived from the mash-shrunken 1v4 fgsea results.
 # Both use the same 30-cell-type row order (germ layer, then alphabetical
@@ -12,7 +13,7 @@
 # color scale is shared across drugs so a reader can scan any pathway column
 # top-to-bottom and directly compare drugs.
 
-# Supp Fig S6: one heatmap per drug of top-N GO:BP pathways, split into
+# Supp Fig S7: one heatmap per drug of top-N GO:BP pathways, split into
 # up-regulated (top-N by max positive NES) and down-regulated (top-N by
 # min negative NES) blocks. Gives the strongest positive and negative
 # GO:BP signals per drug without cherry-picking.

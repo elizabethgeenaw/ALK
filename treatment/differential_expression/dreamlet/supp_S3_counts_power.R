@@ -11,10 +11,10 @@
 #       cells were tested, which is what we want to demonstrate.
 
 # Inputs:
-#   results/treatment/dreamlet_clean_proteincoding/top_all_1v4.csv
+#   results/treatment/dreamlet_1v4_DE/top_all_1v4.csv
 #   results/treatment/dreamlet_clean/pb_treat                       (pseudobulk RDS, for cell counts)
 
-# Outputs (to results/treatment/dreamlet_clean_proteincoding_summaries/):
+# Outputs (to results/treatment/dreamlet_1v4_DE_summaries/):
 #   deg_counts_by_assay_drug.csv        (consumed by Fig 2A)
 #   deg_fraction_by_assay_drug.csv      (consumed by Fig 2A)
 #   plots/deg_abundance_scatter.{pdf,png}  = Fig S3
@@ -37,8 +37,8 @@ drug_colors <- c(Ale = "#0072B2", Bri = "#D55E00", Cer = "#009E73",
 
 # Paths
 base_dir <- "/project/gilad/geena/publication_clean"
-in_dir <- file.path(base_dir, "results/treatment/dreamlet_clean_proteincoding")
-results_dir <- file.path(base_dir, "results/treatment/dreamlet_clean_proteincoding_summaries")
+in_dir <- file.path(base_dir, "results/treatment/dreamlet_1v4_DE")
+results_dir <- file.path(base_dir, "results/treatment/dreamlet_1v4_DE_summaries")
 plots_dir <- file.path(results_dir, "plots")
 dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
 

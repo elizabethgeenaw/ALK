@@ -1,4 +1,4 @@
-# Supp Fig S8: per-drug UpSet plots of drug-specific motif genes, showing
+# Supp Fig S9: per-drug UpSet plots of drug-specific motif genes, showing
 # how much of the drug-specific gene set is shared across the cell types
 # where that drug has a specific motif. One panel per drug that has at least
 # 2 drug-specific motifs (Ale, Cer, Cri, Lor in the current fit; Bri has none).
@@ -10,7 +10,7 @@
 library(UpSetR)
 
 # Paths and per-drug colors matching the rest of the manuscript.
-cormotif_dir <- "/project/gilad/geena/publication_clean/results/treatment/cormotif/proteincoding_newfilter_15cells_4arm"
+cormotif_dir <- "/project/gilad/geena/publication_clean/results/treatment/cormotif/cormotif_15cells_4arm"
 fig_dir      <- file.path(cormotif_dir, "figures")
 dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
 

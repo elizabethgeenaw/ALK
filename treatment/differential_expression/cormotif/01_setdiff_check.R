@@ -12,7 +12,7 @@ library(dreamlet)
 library(dplyr)
 
 pb_treat_path <- "/project/gilad/geena/publication_clean/results/treatment/dreamlet_clean/pb_treat"
-cormotif_dir  <- "/project/gilad/geena/publication_clean/results/treatment/cormotif/protein_coding_only_15cells"
+cormotif_dir  <- "/project/gilad/geena/publication_clean/results/treatment/cormotif/cormotif_15cells_4arm"
 out_dir       <- "/project/gilad/geena/publication_clean/results/treatment/cormotif"
 drugs         <- c("Ale", "Bri", "Cer", "Cri", "Lor")
 min_cells     <- 15L

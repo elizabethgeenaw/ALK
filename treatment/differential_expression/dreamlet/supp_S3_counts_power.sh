@@ -14,4 +14,4 @@ module load gsl/2.7
 module load R/4.4.1
 export LD_LIBRARY_PATH=/software/hdf5-1.12.0-el8-x86_64/lib:/software/gsl-2.7-el8-x86_64/lib:$LD_LIBRARY_PATH
 
-Rscript /project/gilad/geena/ALK_paper_code/treatment/differential_expression/dreamlet/20_supp_S3_counts_power.R
+Rscript /project/gilad/geena/ALK_paper_code/treatment/differential_expression/dreamlet/supp_S3_counts_power.R

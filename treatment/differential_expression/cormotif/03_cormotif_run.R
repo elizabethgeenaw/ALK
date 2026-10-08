@@ -4,9 +4,11 @@
 # terms for BP/MF/CC).
 #
 # Pipeline:
-#   1. filter_genes_cormotif(): protein-coding restriction, drop MT-/RPS-/RPL-
-#      genes, keep only genes with avg log2CPM > 0. Returns RAW counts.
-#      voom + TMM happen downstream inside limmafit.
+#   1. filter_genes_cormotif(): intersect raw counts with the per-cell-type
+#      gene universe written by the dreamlet DE run (one plain-text file per
+#      cell type under results/treatment/dreamlet_1v4_DE/
+#      universes/). No biotype / MT- / RP[SL] / avg logCPM filter.
+#      Returns RAW counts; voom + TMM happen downstream inside limmafit.
 #   2. run_pairwise_limma(): fits limma for all 10 pairwise drug comparisons
 #      with global filter only (no per-comparison filterByExpr, which would
 #      drop drug-specific genes from the comparisons that would detect them).
@@ -124,13 +126,16 @@ motif_specificity <- function(motif.fitted, threshold = 0.5) {
 # inconsistency that existed in generate_pattern_table().
 #
 # motif_type distinguishes pan-comparison (all 10 active) from generic "mixed":
-#   "null"          — no comparisons active
-#   "pan-comparison"— all 10 comparisons active
-#   "{drug}-specific"— exactly the 4 comparisons involving that drug are active
-#   "mixed"         — active, but not all-10 and not drug-specific
+#   "null"            — no comparisons active
+#   "pan-comparison"  — all 10 comparisons active
+#   "{drug}-specific" — exactly the 4 comparisons involving that drug are active
+#   "group-specific"  — the 6 between-group pairs for a 2-vs-3 drug partition
+#                       are active and none of the 4 within-group pairs are
+#                       (e.g. {Cer, Lor} vs {Ale, Bri, Cri})
+#   "mixed"           — active, but none of the above
 #
-# drug_pattern is the raw label (same as drug_label in old generate_pattern_table):
-#   "null" / "mixed" / "{drug}-specific" / "{drug1}+{drug2}" (unreachable; see below)
+# drug_pattern labels: "null" / "mixed" / "{drug}-specific" /
+#                      "{g1}+{g2} vs {other1}+{other2}+{other3}" (group-specific)
 
 compute_motif_meta <- function(q_row, threshold = 0.5) {
   active   <- q_row >= threshold
@@ -147,9 +152,35 @@ compute_motif_meta <- function(q_row, threshold = 0.5) {
   })
   active_drugs <- drugs[drug_flags]
 
+  # Group-specific test (any 2-vs-3 partition): the 6 between-group pairs are
+  # active and none of the 4 within-group pairs are. Returns NULL if no match.
+  classify_group_specific <- function() {
+    if (n_active != 6L) return(NULL)
+    pair_label <- function(a, b) {
+      s <- sort(c(a, b)); paste(s[1], "vs", s[2])
+    }
+    active_labels <- comparison_labels[active]
+    for (g in combn(drugs, 2, simplify = FALSE)) {
+      other    <- setdiff(drugs, g)
+      within_g <- combn(g,     2, function(x) pair_label(x[1], x[2]))
+      within_o <- combn(other, 2, function(x) pair_label(x[1], x[2]))
+      within   <- c(within_g, within_o)
+      between  <- as.vector(outer(g, other, Vectorize(pair_label)))
+      if (setequal(active_labels, between) &&
+          length(intersect(active_labels, within)) == 0L) {
+        return(paste0(paste(g, collapse = "+"), " vs ",
+                      paste(other, collapse = "+")))
+      }
+    }
+    NULL
+  }
+  group_pattern <- classify_group_specific()
+
   # drug_pattern: raw pattern label
   drug_pattern <- if (length(active_drugs) == 0) {
-    if (is_null) "null" else "mixed"
+    if (is_null) "null"
+    else if (!is.null(group_pattern)) group_pattern
+    else "mixed"
   } else if (length(active_drugs) == 1) {
     paste0(active_drugs, "-specific")
   } else {
@@ -167,6 +198,8 @@ compute_motif_meta <- function(q_row, threshold = 0.5) {
     "pan-comparison"
   } else if (length(active_drugs) == 1) {
     paste0(active_drugs, "-specific")
+  } else if (!is.null(group_pattern)) {
+    "group-specific"
   } else {
     "mixed"
   }
@@ -178,6 +211,19 @@ compute_motif_meta <- function(q_row, threshold = 0.5) {
     motif_type           = motif_type,
     active_comparisons   = paste(comparison_labels[active], collapse = "; ")
   )
+}
+
+# Display-friendly label for a compute_motif_meta() result. Keeps motif_type as
+# the stored category ("group-specific") but renders titles with the shorter
+# form "<group> vs others" (e.g. "Cer+Lor vs others") so figure panels identify
+# which 2-vs-3 partition is active without the full drug_pattern verbosity.
+motif_type_display_label <- function(meta) {
+  if (is.null(meta) || is.null(meta$motif_type)) return(NA_character_)
+  if (!identical(meta$motif_type, "group-specific")) return(meta$motif_type)
+  # drug_pattern looks like "Cer+Lor vs Ale+Bri+Cri" — collapse the right-hand
+  # side to "others" for a compact panel title.
+  group <- sub(" vs .*$", "", meta$drug_pattern)
+  paste0(group, " vs others")
 }
 
 
@@ -215,40 +261,46 @@ write_xlsx_safe <- function(df, path) {
 # Returns filtered RAW COUNTS; voom + TMM happen inside limmafit.counts.
 # Side effect: appends a row to gene_filter_log in the calling environment
 # via <<- when cell_type is non-NULL.
-filter_genes_cormotif <- function(celltype_counts, protein_coding_genes = NULL,
-                                   cell_type = NULL) {
+filter_genes_cormotif <- function(celltype_counts,
+                                   cell_type = NULL,
+                                   universe_dir = NULL) {
+  # Intersect raw counts with the per-cell-type gene universe written by the
+  # dreamlet DE run (one file per cell type at
+  # <universe_dir>/<safe cell type>.txt). This keeps Cormotif on exactly the
+  # genes dreamlet tested in this cell type. No biotype / MT- / RP[SL] /
+  # avg logCPM filter is applied; those are handled by processAssays upstream.
+  if (is.null(cell_type))
+    stop("filter_genes_cormotif requires `cell_type` to look up the gene universe.")
+  if (is.null(universe_dir))
+    stop("filter_genes_cormotif requires `universe_dir` (dreamlet universes/ path).")
+
   m <- celltype_counts
   n_input <- nrow(m)
 
-  if (!is.null(protein_coding_genes))
-    m <- m[rownames(m) %in% protein_coding_genes, , drop = FALSE]
-  n_pc <- nrow(m)
+  safe_ct      <- gsub("/", "_", cell_type, fixed = TRUE)
+  universe_f   <- file.path(universe_dir, paste0(safe_ct, ".txt"))
+  if (!file.exists(universe_f))
+    stop("Missing gene universe for '", cell_type, "' at: ", universe_f)
+  universe     <- readLines(universe_f)
+  n_universe   <- length(universe)
+  n_missing_in <- sum(!universe %in% rownames(m))
 
-  mt_rp <- grepl("^MT-", rownames(m)) | grepl("^RP[SL]", rownames(m))
-  m <- m[!mt_rp, , drop = FALSE]
-  n_mtrp <- nrow(m)
+  m <- m[rownames(m) %in% universe, , drop = FALSE]
+  n_kept <- nrow(m)
 
-  dge <- edgeR::DGEList(counts = m)
-  dge <- edgeR::calcNormFactors(dge, method = "TMM")
-  avglogcpm <- rowMeans(edgeR::cpm(dge, log = TRUE, prior.count = 1))
-  m <- m[avglogcpm > 0, , drop = FALSE]
-  n_cpm <- nrow(m)
+  cat("  ", cell_type, ": input ", n_input,
+      " -> universe ", n_universe,
+      " (missing from input: ", n_missing_in, ")",
+      " -> kept ", n_kept, "\n", sep = "")
 
-  ct_label <- if (!is.null(cell_type)) cell_type else "?"
-  cat("  ", ct_label, ": ", n_input,
-      " -> ", n_pc,    " (protein-coding)",
-      " -> ", n_mtrp,  " (MT/RP)",
-      " -> ", n_cpm,   " (avgCPM>0)\n",
-      sep = "")
-
-  if (!is.null(cell_type) && exists("gene_filter_log", envir = .GlobalEnv)) {
+  if (exists("gene_filter_log", envir = .GlobalEnv)) {
     gene_filter_log[[cell_type]] <<- data.frame(
-      cell_type              = cell_type,
-      n_input                = n_input,
-      n_after_protein_coding = n_pc,
-      n_after_mt_rp          = n_mtrp,
-      n_after_avglogcpm      = n_cpm,
-      stringsAsFactors       = FALSE
+      cell_type         = cell_type,
+      n_input           = n_input,
+      n_universe        = n_universe,
+      n_missing_from_in = n_missing_in,
+      n_kept            = n_kept,
+      stringsAsFactors  = FALSE
     )
   }
 
@@ -499,10 +551,11 @@ plot_go_panel <- function(cell_type, motif_number, ontology = "BP",
 
 # Pairwise limma fits (TMM + voom, no per-comparison filterByExpr).
 # Per-comparison filterByExpr would exclude genes expressed specifically in one
-# drug arm; we use the global avglogcpm > 0 filter in filter_genes_cormotif
-# instead. voom's mean-variance weighting handles low-expression genes within
-# specific comparisons by assigning them near-zero t-statistics (effectively
-# neutral in the EM). This matches the lab's CormotifCounts_v2 approach.
+# drug arm; we restrict upstream to the per-cell-type gene universe in
+# filter_genes_cormotif instead (same genes dreamlet tested in this cell type).
+# voom's mean-variance weighting handles low-expression genes within specific
+# comparisons by assigning them near-zero t-statistics (effectively neutral in
+# the EM). This matches the lab's CormotifCounts_v2 approach.
 #
 # The installed CormotifCounts::limmafit.counts has a separate coding bug
 # (not.nas %in% keep with a logical vector collapses genes to index 1). We
@@ -529,8 +582,8 @@ run_pairwise_limma <- function(count_mat, group_labels_numeric, compid,
 
     # No per-comparison filterByExpr: genes expressed specifically in one drug arm
     # (near-zero counts in the comparison arm) would fail filterByExpr for the
-    # comparisons against that arm, making them invisible to the EM. The global
-    # avglogcpm > 0 filter in filter_genes_cormotif is the correct inclusion
+    # comparisons against that arm, making them invisible to the EM. The per-
+    # cell-type universe filter in filter_genes_cormotif is the correct inclusion
     # boundary; voom assigns near-zero t-statistics (effectively neutral) to
     # lowly expressed genes within specific comparisons without discarding them.
     selected <- which(!apply(counts_sub, 1, anyNA))
@@ -674,12 +727,12 @@ run_topGO <- function(gene_symbols, all_genes_list, ontology = "BP") {
 # Per-cell-type analysis
 
 analyze_single_cell_type <- function(merged_matrix, cell_type, output_dir,
-                                     protein_coding_genes) {
+                                     universe_dir = NULL) {
   cat("Processing:", cell_type, "\n")
   if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
 
   # Filter genes; returns raw counts. Gene filter log updated as side effect.
-  raw_counts <- filter_genes_cormotif(merged_matrix, protein_coding_genes, cell_type)
+  raw_counts <- filter_genes_cormotif(merged_matrix, cell_type, universe_dir)
 
   motif.fitted <- run_cormotif(raw_counts, cell_type, output_dir)
 
@@ -760,7 +813,8 @@ load_and_merge_pseudobulk <- function(pb_dir,
 
 # Run analysis for all cell types
 
-analyze_all_cell_types <- function(merged_pb, output_base_dir, protein_coding_genes) {
+analyze_all_cell_types <- function(merged_pb, output_base_dir,
+                                   universe_dir = NULL) {
   all_results <- list()
 
   for (cell_type in names(merged_pb)) {
@@ -769,7 +823,7 @@ analyze_all_cell_types <- function(merged_pb, output_base_dir, protein_coding_ge
     tryCatch({
       output_dir <- file.path(output_base_dir, cell_type)
       go_results <- analyze_single_cell_type(merged_pb[[cell_type]], cell_type,
-                                             output_dir, protein_coding_genes)
+                                             output_dir, universe_dir)
       all_results[[cell_type]] <- go_results
     }, error = function(e) {
       cat("Error in processing:", cell_type, "\n")
@@ -886,7 +940,8 @@ replot_all <- function(output_base_dir, ontology = "BP",
       meta <- motif_metas[[i]]
       if (!is.null(meta)) {
         n_genes <- sum(motif.fitted$bestmotif$clustlike[, m] > 0.5)
-        paste0("Motif ", m, " | ", meta$motif_type, " | ", n_genes, " genes")
+        paste0("Motif ", m, " | ", motif_type_display_label(meta),
+               " | ", n_genes, " genes")
       } else {
         paste0("Motif ", m)
       }
@@ -1350,7 +1405,8 @@ assemble_go_supplementary_pages <- function(
         meta <- compute_motif_meta(motif.fitted$bestmotif$motif.q[m, ])
         if (meta$motif_type == "null") next
         n_genes <- sum(motif.fitted$bestmotif$clustlike[, m] > 0.5)
-        title <- paste0("Motif ", m, " | ", meta$motif_type, "\n", n_genes, " genes")
+        title <- paste0("Motif ", m, " | ", motif_type_display_label(meta),
+                        "\n", n_genes, " genes")
       } else {
         title <- paste0("Motif ", m)
       }
@@ -1442,16 +1498,21 @@ assemble_go_supplementary_pages <- function(
 
 
 # Main
+#
+# Guard: callers that only need the function definitions (e.g.
+# 06_regen_s7_figure.R) can set CORMOTIF_HELPERS_ONLY <- TRUE before source()
+# to skip this driver block. All helpers above are already loaded by that point.
+if (!exists("CORMOTIF_HELPERS_ONLY") || !isTRUE(CORMOTIF_HELPERS_ONLY)) {
 
 pb_dir <- "/project/gilad/geena/publication_clean/results/treatment/cormotif/pseudobulk_15cells_4indiv"
 
-hg_protein_coding_genes <- readLines(
-  "/project/gilad/geena/publication_clean/reference_sets/hg_protein_coding_genes.tsv"
-)
+# Per-cell-type gene universes written by 01_dreamlet_1v4_DE.R.
+# Cormotif intersects its raw counts with the universe for each cell type.
+universe_dir <- "/project/gilad/geena/publication_clean/results/treatment/dreamlet_1v4_DE/universes"
 
 merged_pb <- load_and_merge_pseudobulk(pb_dir)
 
-output_base_dir <- "/project/gilad/geena/publication_clean/results/treatment/cormotif/proteincoding_newfilter_15cells_4arm"
+output_base_dir <- "/project/gilad/geena/publication_clean/results/treatment/cormotif/cormotif_15cells_4arm"
 dir.create(output_base_dir, recursive = TRUE, showWarnings = FALSE)
 
 # gene_filter_log is populated as a side effect of filter_genes_cormotif() via <<-
@@ -1460,21 +1521,25 @@ dir.create(output_base_dir, recursive = TRUE, showWarnings = FALSE)
 
 # Test a single cell type
 # analyze_single_cell_type(merged_pb[["Cardiac mesoderm cells"]], "Cardiac mesoderm cells",
-#                             file.path(output_base_dir, "Cardiac mesoderm cells"), hg_protein_coding_genes)
+#                             file.path(output_base_dir, "Cardiac mesoderm cells"), NULL, universe_dir)
 #write.csv(dplyr::bind_rows(gene_filter_log_single),
 #               file.path(output_base_dir, "gene_filter_log_single.csv"),
 #               row.names = FALSE)
 #     cat("Saved gene_filter_log_single.csv\n")
 
- 
-   
-# Run for all cell types
-#gene_filter_log <- list()
-#all_results <- analyze_all_cell_types(merged_pb, output_base_dir, protein_coding_genes = hg_protein_coding_genes)
-#write.csv(dplyr::bind_rows(gene_filter_log),
-#            file.path(output_base_dir, "gene_filter_log.csv"),
-#            row.names = FALSE)
-#cat("Saved gene_filter_log.csv\n")
+
+
+# Run for all cell types.
+# To re-render figures without re-fitting Cormotif, use
+# 04_rerun_pattern_table.R or 06_regen_s7_figure.R, both of which source
+# this file with CORMOTIF_HELPERS_ONLY <- TRUE to skip this driver.
+gene_filter_log <- list()
+all_results <- analyze_all_cell_types(merged_pb, output_base_dir,
+                                      universe_dir = universe_dir)
+write.csv(dplyr::bind_rows(gene_filter_log),
+          file.path(output_base_dir, "gene_filter_log.csv"),
+          row.names = FALSE)
+cat("Saved gene_filter_log.csv\n")
 
 rerun_topgo_from_saved(output_base_dir)
 
@@ -1490,3 +1555,5 @@ assemble_go_supplementary_pages(
   group_colors    = setNames(germ_layer_colors[cell_type_germ_layer],
                              names(cell_type_germ_layer))
 )
+
+}  # end CORMOTIF_HELPERS_ONLY guard

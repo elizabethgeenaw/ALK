@@ -26,14 +26,18 @@ drug_colors <- c(Ale = "#0072B2", Bri = "#D55E00", Cer = "#009E73",
 
 # Non-drug motif-type palette (used across panels for consistency).
 # Drug-specific motifs get their own drug's color, added dynamically by
-# motif_type_color() below.
+# motif_type_color() below. "group-specific" motifs (active in all 6
+# between-group pairwise comparisons for a 2-drug grouping and in none of
+# the 4 within-group comparisons) use a single purple so both the Cer+Lor
+# and Bri+Cri variants render consistently.
 motif_type_colors <- c(
   "pan-comparison" = "#2166AC",
+  "group-specific" = "#5F3C8F",
   "mixed"          = "#999999",
   "null"           = "#E8E8E8"
 )
 
-output_base_dir <- "/project/gilad/geena/publication_clean/results/treatment/cormotif/proteincoding_newfilter_15cells_4arm"
+output_base_dir <- "/project/gilad/geena/publication_clean/results/treatment/cormotif/cormotif_15cells_4arm"
 
 # Germ-layer palette and cell-type -> germ-layer map. Order (Epithelium ->
 # Ectoderm -> Mesoderm -> Endoderm -> iPSC) matches the UMAP legend, and
@@ -142,8 +146,14 @@ motif_type_color <- function(type) {
 # germ-layer sequence so the neural clustering of Lor-specific motifs stays
 # visually together, but germ layer is not encoded on the row labels
 # themselves (the legend on Fig 3A already establishes the palette).
+#
+# include_cerlor_column (default FALSE) appends an extra "Cer+Lor vs others"
+# column, filled with the group-specific palette color (#5F3C8F) for cell
+# types that carry a group-specific motif whose active comparisons are the
+# six between-group pairs for {Cer, Lor} vs {Ale, Bri, Cri}. Saves to a
+# "_alt" filename so the base figure is unaffected.
 
-fig3B_drug_celltype_matrix <- function() {
+fig3B_drug_celltype_matrix <- function(include_cerlor_column = FALSE) {
   pt <- load_pattern_table()
 
   ds      <- pt[grepl("-specific$", pt$motif_type), ]
@@ -165,33 +175,60 @@ fig3B_drug_celltype_matrix <- function() {
     warning("Expected Bri column empty; got: ", col_totals["Bri"])
   cat("\n")
 
+  # Optionally add the "Cer+Lor vs others" group-specific overlay as an extra
+  # column. One row per cell type: present = 1 if a group-specific motif in
+  # that cell type matches the Cer+Lor-vs-Ale+Bri+Cri partition.
+  cl_label <- "Cer+Lor vs others"
+  col_order <- drugs
+  if (include_cerlor_column) {
+    cl_cts <- unique(pt$cell_type[pt$motif_type == "group-specific" &
+                                  pt$drug_pattern == "Cer+Lor vs Ale+Bri+Cri"])
+    cl_rows <- data.frame(
+      cell_type = sort(unique(mat$cell_type)),
+      drug      = cl_label,
+      stringsAsFactors = FALSE
+    )
+    cl_rows$present <- as.integer(cl_rows$cell_type %in% cl_cts)
+    mat <- dplyr::bind_rows(mat, cl_rows)
+    col_order <- c(drugs, cl_label)
+    cat("=== Fig 3B alt: Cer+Lor-vs-others column ===\n")
+    cat("  cells filled: ", sum(cl_rows$present), " / ", nrow(cl_rows), "\n\n",
+        sep = "")
+  }
+
   # Row order: germ-layer sequence top to bottom. ggplot's discrete y-axis
   # renders factor levels bottom to top, so we rev() here.
   ct_top_to_bottom <- names(cell_type_germ_layer)[
     names(cell_type_germ_layer) %in% unique(mat$cell_type)]
   mat$cell_type <- factor(mat$cell_type, levels = rev(ct_top_to_bottom))
-  mat$drug      <- factor(mat$drug, levels = drugs)
+  mat$drug      <- factor(mat$drug, levels = col_order)
 
   # fill_drug is NA for absent cells so scale_fill_manual can render them
   # with na.value = "white".
   mat$fill_drug <- factor(ifelse(mat$present == 1L, as.character(mat$drug),
                                   NA_character_),
-                          levels = drugs)
+                          levels = col_order)
+
+  fill_palette <- c(drug_colors, setNames("#5F3C8F", cl_label))
+  xaxis_colors <- unname(fill_palette[col_order])
 
   p <- ggplot(mat, aes(x = drug, y = cell_type)) +
     geom_tile(aes(fill = fill_drug), color = "grey80", linewidth = 0.3) +
-    scale_fill_manual(values = drug_colors, na.value = "white",
-                      breaks = drugs, name = "Drug",
+    scale_fill_manual(values = fill_palette, na.value = "white",
+                      breaks = col_order, name = "Drug",
                       drop = FALSE, guide = "none") +
     labs(x = "Drug", y = "Cell type") +
     theme_classic(base_size = 11) +
     theme(
       axis.text.x = element_text(hjust = 0.5,
-                                 color = drug_colors[drugs], face = "bold"),
+                                 color = xaxis_colors, face = "bold"),
       axis.text.y = element_text(size = 8, color = "black")
     )
 
-  save_figure(p, "fig3B_drug_celltype_matrix", w = 5.5, h = 8)
+  stem <- if (include_cerlor_column) "fig3B_drug_celltype_matrix_alt"
+          else "fig3B_drug_celltype_matrix"
+  w <- if (include_cerlor_column) 6.3 else 5.5
+  save_figure(p, stem, w = w, h = 8)
 }
 
 
@@ -505,6 +542,7 @@ cat("Figures dir:", figures_dir(), "\n")
 cat("========================================\n\n")
 
 fig3B_drug_celltype_matrix()
+fig3B_drug_celltype_matrix(include_cerlor_column = TRUE)
 fig3C_motif_go_enrichment()
 fig3D_lor_motif_upset()
 

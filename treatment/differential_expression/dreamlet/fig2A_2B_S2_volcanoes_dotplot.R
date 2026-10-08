@@ -4,8 +4,7 @@
 
 # Combined figure script for the two main-text DE panels (Fig 2A and 2B) and
 # the supplementary volcano gallery (Fig S2). All three read the same dreamlet
-# 1v4 protein-coding DE output, so they share data loading and germ-layer
-# color setup.
+# 1v4 DE output, so they share data loading and germ-layer color setup.
 
 # Fig 2A: horizontal dotplot with drugs on the y-axis, 30 cell types on the
 # x-axis, dot size = % of tested genes that are DE (FDR < 0.05) in that
@@ -20,11 +19,11 @@
 # broken across 5 pages so each page fits on letter paper.
 
 # Inputs:
-#   results/treatment/dreamlet_clean_proteincoding/top_all_1v4.csv
-#   results/treatment/dreamlet_clean_proteincoding_summaries/ddg_counts_by_assay_drug.csv
-#   results/treatment/dreamlet_clean_proteincoding_summaries/ddg_fraction_by_assay_drug.csv
+#   results/treatment/dreamlet_1v4_DE/top_all_1v4.csv
+#   results/treatment/dreamlet_1v4_DE_summaries/deg_counts_by_assay_drug.csv
+#   results/treatment/dreamlet_1v4_DE_summaries/deg_fraction_by_assay_drug.csv
 
-# Outputs (all to results/treatment/dreamlet_clean_proteincoding_summaries/plots/):
+# Outputs (all to results/treatment/dreamlet_1v4_DE_summaries/plots/):
 #   deg_dotplot_fraction.{pdf,png}   -- Fig 2A
 #   volcano_featured.{pdf,png}       -- Fig 2B
 #   volcano_supp_allct.pdf + volcano_supp_allct_p{1..5}.png -- Supp Fig S2
@@ -94,8 +93,8 @@ cell_type_germ_layer <- c(
 
 # Paths
 base_dir <- "/project/gilad/geena/publication_clean"
-in_dir <- file.path(base_dir, "results/treatment/dreamlet_clean_proteincoding")
-results_dir <- file.path(base_dir, "results/treatment/dreamlet_clean_proteincoding_summaries")
+in_dir <- file.path(base_dir, "results/treatment/dreamlet_1v4_DE")
+results_dir <- file.path(base_dir, "results/treatment/dreamlet_1v4_DE_summaries")
 plots_dir <- file.path(results_dir, "plots")
 dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
 
@@ -124,9 +123,9 @@ message(ts(), " ", nrow(top_all), " rows, ",
 # Read the pre-computed per-(cell type, drug) DEG counts and fractions
 # (produced by supp_S3_counts_power.R).
 message(ts(), " Loading pre-computed count/fraction tables (Fig 2A)...")
-counts_by_assay <- read.csv(file.path(results_dir, "ddg_counts_by_assay_drug.csv"),
+counts_by_assay <- read.csv(file.path(results_dir, "deg_counts_by_assay_drug.csv"),
                             stringsAsFactors = FALSE)
-fraction_by_assay <- read.csv(file.path(results_dir, "ddg_fraction_by_assay_drug.csv"),
+fraction_by_assay <- read.csv(file.path(results_dir, "deg_fraction_by_assay_drug.csv"),
                               stringsAsFactors = FALSE)
 
 # Cell type ordering: germ layer, then alphabetical within layer. This is the

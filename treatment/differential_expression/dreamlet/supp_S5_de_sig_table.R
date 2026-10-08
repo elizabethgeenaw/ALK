@@ -4,7 +4,7 @@
 
 #!/usr/bin/env Rscript
 # 22_supp_S5_de_sig_table.R
-# Pre-LOO significant 1v4 DE (protein-coding) supplementary Excel.
+# Pre-LOO significant 1v4 DE supplementary Excel.
 # Sheet 1: flat significant rows (adj.P.Val < 0.05).
 # Sheet 2: drug x cell-type count matrix.
 
@@ -12,7 +12,7 @@ library(dplyr)
 library(tidyr)
 library(openxlsx)
 
-results_dir <- "/project/gilad/geena/publication_clean/results/treatment/dreamlet_clean_proteincoding"
+results_dir <- "/project/gilad/geena/publication_clean/results/treatment/dreamlet_1v4_DE"
 out_path    <- file.path(results_dir, "supp_table_DE_sig.xlsx")
 
 message("Reading top_all_1v4.csv...")

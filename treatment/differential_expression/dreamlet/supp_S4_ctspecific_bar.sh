@@ -15,8 +15,8 @@ module load gsl/2.7
 module load R/4.4.1
 export LD_LIBRARY_PATH=/software/hdf5-1.12.0-el8-x86_64/lib:/software/gsl-2.7-el8-x86_64/lib:$LD_LIBRARY_PATH
 
-echo "[$(date)] Starting figures_ctspecific_bar.R on $(hostname)"
-Rscript figures_ctspecific_bar.R
+echo "[$(date)] Starting supp_S4_ctspecific_bar.R on $(hostname)"
+Rscript /project/gilad/geena/ALK_paper_code/treatment/differential_expression/dreamlet/supp_S4_ctspecific_bar.R
 EXIT_CODE=$?
-echo "[$(date)] figures_ctspecific_bar.R finished with exit code ${EXIT_CODE}"
+echo "[$(date)] supp_S4_ctspecific_bar.R finished with exit code ${EXIT_CODE}"
 exit $EXIT_CODE

@@ -12,4 +12,4 @@
 
 module load R/4.4.1
 
-Rscript /project/gilad/geena/ALK_paper_code/treatment/differential_expression/dreamlet/04_dreamlet_mash_native_fgsea_S9.R
+Rscript /project/gilad/geena/ALK_paper_code/treatment/differential_expression/dreamlet/04_dreamlet_mash_fgsea.R

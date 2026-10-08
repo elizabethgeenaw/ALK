@@ -11,4 +11,4 @@
 
 module load R/4.4.1
 
-Rscript /project/gilad/geena/ALK_paper_code/treatment/differential_expression/cormotif/20_supp_S8_drug_specific_upset.R
+Rscript /project/gilad/geena/ALK_paper_code/treatment/differential_expression/cormotif/supp_S8_upset.R

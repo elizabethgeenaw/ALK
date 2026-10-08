@@ -4,11 +4,12 @@
 # For each drug in turn, we contrast it against the mean of the other four
 # ALK inhibitors ("one-vs-others"), fit a dreamlet model with individual
 # as random effect, and write out topTable results per drug plus a combined
-# top_all_1v4.csv used by nearly every downstream DE analysis. Genes are
-# restricted to protein-coding; cell types with any drug arm below the
-# min-individual threshold are dropped.
+# top_all_1v4.csv used by nearly every downstream DE analysis. Every gene
+# retained by processAssays() is tested (no biotype / MT- / RP[SL] filter).
+# Cell types with any drug arm below the min-individual threshold are dropped.
 # Also writes a per-arm QC table (DE_QC_powertier.csv) and the subset of
 # rows that fall below the exclusion threshold (DE_excluded_conditions.csv).
+# Writes per-cell-type gene universes (universes/<cell type>.txt) for Cormotif.
 
 library(BPCells)
 library(Seurat)
@@ -40,23 +41,15 @@ contrasts <- c(
 
 # Paths
 base_dir <- "/project/gilad/geena/publication_clean"
-results_dir <- file.path(base_dir, "results/treatment/dreamlet_clean_proteincoding")
+results_dir <- file.path(base_dir, "results/treatment/dreamlet_1v4_DE")
 dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
 
-# Load protein-coding gene list and restrict the pseudobulk object to those
-# genes only. This filter happens once here; processAssays and dreamlet
-# operate on the filtered object.
-pc_genes <- readLines(file.path(base_dir, "reference_sets/HgProteinCodingGenes.tsv"))
-message("Loaded ", length(pc_genes), " protein-coding genes")
-
+# Load the pseudobulk object. No pre-filter on biotype or gene name is
+# applied here; processAssays applies its per-cell-type expression filter
+# and the surviving genes are what dreamlet tests.
 message("Loading pb_treat...")
-pb_treat_all <- readRDS(file.path(base_dir, "results/treatment/dreamlet_clean/pb_treat"))
-
-keep_genes <- rownames(pb_treat_all) %in% pc_genes
-pb_treat <- pb_treat_all[keep_genes, ]
-message("Genes after protein-coding filter: ", nrow(pb_treat),
-        " (from ", nrow(pb_treat_all), ")")
-rm(pb_treat_all)
+pb_treat <- readRDS(file.path(base_dir, "results/treatment/dreamlet_clean/pb_treat"))
+message("Loaded pb_treat: ", nrow(pb_treat), " genes, ", ncol(pb_treat), " samples")
 
 # Get per-(donor, cell type) cell counts. `arm` is the drug label extracted
 # from the pseudobulk sample name (first 3 characters). Both cc and arm are
@@ -95,6 +88,21 @@ res.proc.indivRE_treat <- processAssays(
 )
 saveRDS(res.proc.indivRE_treat, file.path(results_dir, "resprocindivRE_treat"))
 message("Saved: resprocindivRE_treat")
+
+# Write per-cell-type gene universes (plain text, one gene per line) for
+# Cormotif. Cormotif reads these to restrict its input to the exact gene
+# set dreamlet tested in that cell type, keeping the two analyses on the
+# same universe. File names use the raw cell type with "/" replaced to "_"
+# so there are no path-separator surprises.
+universe_dir <- file.path(results_dir, "universes")
+dir.create(universe_dir, recursive = TRUE, showWarnings = FALSE)
+for (ct in assayNames(res.proc.indivRE_treat)) {
+  genes <- rownames(assay(res.proc.indivRE_treat, ct))
+  safe_ct <- gsub("/", "_", ct, fixed = TRUE)
+  writeLines(genes, file.path(universe_dir, paste0(safe_ct, ".txt")))
+}
+message("Wrote per-cell-type gene universes to ", universe_dir,
+        " (", length(assayNames(res.proc.indivRE_treat)), " files)")
 
 # Cell types that survived both the arm filter above AND processAssays'
 # gene filter.
@@ -151,59 +159,75 @@ message("Written: top_all_1v4.csv (", nrow(top_all), " rows)")
 #   n_other_min: minimum donors across the other four drug arms
 #   n_DEG, median_absLFC: DE burden from top_all above
 # Rows are flagged "exclude" if any relevant arm is below min_arm_exclude.
+# Wrapped in tryCatch so a tidyeval glitch here never kills the whole DE
+# pipeline; top_all_1v4.csv + resprocindivRE_treat + res.dl2_treat are the
+# real outputs and already written above.
 message("Computing per-arm QC table...")
+tryCatch({
+  arm_counts <- do.call(rbind, lapply(colnames(cc), function(ct) {
+    keep <- cc[, ct] >= min_cells
+    tab <- table(factor(arm[keep], levels = drug_order))
+    data.frame(cell_type = ct, t(as.integer(tab)))
+  }))
+  colnames(arm_counts) <- c("cell_type", drug_order)
 
-arm_counts <- do.call(rbind, lapply(colnames(cc), function(ct) {
-  keep <- cc[, ct] >= min_cells
-  tab <- table(factor(arm[keep], levels = drug_order))
-  data.frame(cell_type = ct, t(as.integer(tab)))
-}))
-colnames(arm_counts) <- c("cell_type", drug_order)
+  # Long-form arm count table built with base R (avoids tidyr edge cases).
+  arm_long <- do.call(rbind, lapply(drug_order, function(d) {
+    data.frame(cell_type = arm_counts$cell_type,
+               drug = d,
+               n_focal_arm = arm_counts[[d]],
+               stringsAsFactors = FALSE)
+  }))
 
-arm_long <- arm_counts %>%
-  pivot_longer(all_of(drug_order), names_to = "drug", values_to = "n_focal_arm")
+  other_min_mat <- do.call(rbind, lapply(seq_len(nrow(arm_counts)), function(i) {
+    sapply(drug_order, function(d) min(arm_counts[i, setdiff(drug_order, d)]))
+  }))
+  other_min_long <- do.call(rbind, lapply(drug_order, function(d) {
+    data.frame(cell_type = arm_counts$cell_type,
+               drug = d,
+               n_other_min = other_min_mat[, d],
+               stringsAsFactors = FALSE)
+  }))
+  arm_long <- merge(arm_long, other_min_long,
+                    by = c("cell_type", "drug"), all.x = TRUE)
 
-other_min_mat <- do.call(rbind, lapply(seq_len(nrow(arm_counts)), function(i) {
-  sapply(drug_order, function(d) min(arm_counts[i, setdiff(drug_order, d)]))
-}))
-other_min_df <- data.frame(cell_type = arm_counts$cell_type, other_min_mat) %>%
-  pivot_longer(cols = all_of(drug_order),
-               names_to = "drug", values_to = "n_other_min")
+  deg_summary <- top_all %>%
+    filter(adj.P.Val < fdr_threshold) %>%
+    group_by(assay, drug) %>%
+    summarise(n_DEG = n(), median_absLFC = median(abs(logFC)), .groups = "drop") %>%
+    as.data.frame()
 
-arm_long <- left_join(arm_long, other_min_df, by = c("cell_type", "drug"))
+  qc <- merge(arm_long, deg_summary,
+              by.x = c("cell_type", "drug"),
+              by.y = c("assay", "drug"),
+              all.x = TRUE)
+  qc$n_DEG[is.na(qc$n_DEG)] <- 0L
+  qc$min_arm <- pmin(qc$n_focal_arm, qc$n_other_min)
+  qc$power_tier <- ifelse(
+    qc$n_focal_arm < min_arm_exclude | qc$n_other_min < min_arm_exclude,
+    "exclude", "pass"
+  )
+  names(qc)[names(qc) == "cell_type"] <- "assay"
+  qc <- qc[order(qc$min_arm, -qc$median_absLFC, na.last = TRUE), ]
 
-deg_summary <- top_all %>%
-  filter(adj.P.Val < fdr_threshold) %>%
-  group_by(assay, drug) %>%
-  summarise(n_DEG = n(), median_absLFC = median(abs(logFC)), .groups = "drop")
+  write.csv(qc, file.path(results_dir, "DE_QC_powertier.csv"), row.names = FALSE)
+  message("Written: DE_QC_powertier.csv")
 
-qc <- arm_long %>%
-  left_join(deg_summary, by = c("cell_type" = "assay", "drug")) %>%
-  replace_na(list(n_DEG = 0L, median_absLFC = NA_real_)) %>%
-  mutate(
-    min_arm = pmin(n_focal_arm, n_other_min),
-    power_tier = ifelse(
-      n_focal_arm < min_arm_exclude | n_other_min < min_arm_exclude,
-      "exclude", "pass"
-    )
-  ) %>%
-  rename(assay = cell_type) %>%
-  arrange(min_arm, desc(median_absLFC))
+  cat("\nPower tier distribution:\n")
+  print(table(qc$power_tier))
 
-write.csv(qc, file.path(results_dir, "DE_QC_powertier.csv"), row.names = FALSE)
-message("Written: DE_QC_powertier.csv")
+  excluded <- qc[qc$power_tier == "exclude", ]
+  excluded <- excluded[order(excluded$assay, excluded$drug), ]
+  cat("\nExcluded conditions (n = ", nrow(excluded), "):\n", sep = "")
+  print(excluded[, c("assay", "drug", "n_focal_arm", "n_other_min",
+                     "n_DEG", "median_absLFC")])
 
-cat("\nPower tier distribution:\n")
-print(table(qc$power_tier))
-
-excluded <- qc %>% filter(power_tier == "exclude") %>% arrange(assay, drug)
-cat("\nExcluded conditions (n = ", nrow(excluded), "):\n", sep = "")
-print(excluded %>%
-        select(assay, drug, n_focal_arm, n_other_min, n_DEG, median_absLFC) %>%
-        as.data.frame())
-
-write.csv(excluded, file.path(results_dir, "DE_excluded_conditions.csv"),
-          row.names = FALSE)
-message("Written: DE_excluded_conditions.csv")
+  write.csv(excluded, file.path(results_dir, "DE_excluded_conditions.csv"),
+            row.names = FALSE)
+  message("Written: DE_excluded_conditions.csv")
+}, error = function(e) {
+  message("QC table generation failed (non-fatal): ", conditionMessage(e))
+  message("Main DE outputs (top_all_1v4.csv, res.dl2_treat, universes/) are already written.")
+})
 
 message("01_dreamlet_1v4_DE.R complete.")

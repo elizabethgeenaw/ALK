@@ -26,8 +26,8 @@ library(RColorBrewer)
 base_dir    <- "/project/gilad/geena/publication_clean"
 mash_dir    <- file.path(base_dir, "results/mash/medianUMI1")
 lfc3_dir    <- file.path(mash_dir, "lfc3")
-de_dir      <- file.path(base_dir, "results/treatment/dreamlet_clean_proteincoding")
-cormotif_dir <- file.path(base_dir, "results/treatment/cormotif/proteincoding_newfilter_15cells_4arm")
+de_dir      <- file.path(base_dir, "results/treatment/dreamlet_1v4_DE")
+cormotif_dir <- file.path(base_dir, "results/treatment/cormotif/cormotif_15cells_4arm")
 out_dir     <- file.path(lfc3_dir, "sharing_characterization")
 dir.create(out_dir, showWarnings = FALSE)
 

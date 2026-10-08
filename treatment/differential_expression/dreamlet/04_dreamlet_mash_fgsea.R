@@ -3,7 +3,10 @@
 # Runs fgseaMultilevel on the mash-shrunken 1v4 DE posteriors (five per-drug
 # mash fits, 30 cell-type columns each). For each (drug, cell type) we rank
 # genes by t = posterior_mean / posterior_sd (as in Umans et al.) and test
-# every MSigDB Hallmark and GO:BP pathway against that ranking.
+# every MSigDB Hallmark and GO:BP pathway against that ranking. Genes that
+# dreamlet::run_mash() flagged as untested in a given (drug, cell type)
+# condition (SE = 1e11, so PSD >= 1e10) are dropped before ranking so they
+# don't dilute the fgsea result as a pile of t ~ 0 noise.
 
 # The output is one long fgsea table (one row per drug x cell type x pathway),
 # which is Supp Table S9 and the input to every downstream pathway figure
@@ -137,8 +140,11 @@ run_fgsea_on_column <- function(t_vec, drug_label, assay_label) {
   bind_rows(out[!sapply(out, is.null)])
 }
 
-# Main loop: for each drug, load PM and PSD matrices, compute t = PM/PSD,
-# run fgsea on every cell-type column, and collect results.
+# Main loop: for each drug, load PM and PSD matrices, drop (drug, cell type,
+# gene) triples that dreamlet::run_mash() marked as untested (SE = 1e11, so
+# PSD >= 1e10), compute t = PM/PSD on the kept entries only, and run fgsea
+# on every cell-type column. Dropping imputed cells is essential — if they
+# stay in the ranked vector they land at t ~ 0 and dilute every pathway's NES.
 message(ts(), " Running fgsea on dreamlet_mash/by_drug_* ...")
 
 all_results <- vector("list", length(drug_order))
@@ -163,14 +169,17 @@ for (i in seq_along(drug_order)) {
   pm <- pm[common_rows, common_cols, drop = FALSE]
   psd <- psd[common_rows, common_cols, drop = FALSE]
 
-  # Ranking statistic: t = posterior mean / posterior sd, one column per CT.
-  t_mat <- pm / psd
-
-  drug_results <- vector("list", ncol(t_mat))
-  for (j in seq_len(ncol(t_mat))) {
-    assay_label <- colnames(t_mat)[j]
-    t_vec <- t_mat[, j]
-    names(t_vec) <- rownames(t_mat)
+  drug_results <- vector("list", ncol(pm))
+  for (j in seq_len(ncol(pm))) {
+    assay_label <- colnames(pm)[j]
+    pm_col  <- pm[,  j]
+    psd_col <- psd[, j]
+    # Keep only entries where mash actually estimated an effect: finite PM
+    # and PSD, PSD strictly positive, and PSD below the 1e10 threshold that
+    # separates real estimates from the SE = 1e11 imputation sentinel.
+    keep <- is.finite(pm_col) & is.finite(psd_col) & psd_col > 0 & psd_col < 1e10
+    t_vec <- (pm_col / psd_col)[keep]
+    names(t_vec) <- rownames(pm)[keep]
     drug_results[[j]] <- run_fgsea_on_column(t_vec, drug, assay_label)
   }
   all_results[[i]] <- bind_rows(drug_results[!sapply(drug_results, is.null)])

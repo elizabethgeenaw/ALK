@@ -13,4 +13,4 @@
 
 module load R/4.2.0
 
-Rscript /project/gilad/geena/ALK_paper_code/treatment/differential_expression/cormotif/03_cormotif_run_S7fig_S10_S14tables.R
+Rscript /project/gilad/geena/ALK_paper_code/treatment/differential_expression/cormotif/03_cormotif_run.R
