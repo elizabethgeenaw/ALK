@@ -38,3 +38,6 @@ treatment/differential_expression/cormotif/
 shared/
 treatment/matrixeqtl/supp_pcs_per_condition.R
 treatment/preprocessing/fig1C_render.R
+
+*.sh
+*.sbatch
