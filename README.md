@@ -35,14 +35,14 @@ ALK_paper_code/
 ### 1v4 differential expression (dreamlet)
 - The dreamlet pseudobulk SingleCellExperiment `pb_treat` (one assay per cell type) is built from the post-QC annotated Seurat object in `treatment/differential_expression/dreamlet/00_build_pb_treat.R`. This is a one-time preparation step; downstream scripts load the cached RDS
 - Canonical 1v4 DE — each ALK inhibitor vs. the mean of the other four, with individual as a random effect — is run in `treatment/differential_expression/dreamlet/01_dreamlet_1v4_DE.R`
-- Every gene retained by `dreamlet::processAssays()` is tested (no biotype / MT- / RP[SL] / avg-logCPM pre-filter); cell types with any drug arm below the 4-donor threshold are dropped up-front. Output is `top_all_1v4.csv`, the input to every downstream DE analysis
+- Every gene retained by `dreamlet::processAssays()` is tested; cell types with any drug arm below the 4-donor threshold are dropped up-front. Output is `top_all_1v4.csv`
 - A per-arm QC table (`DE_QC_powertier.csv`) is also produced
 
 ### Cross-cell-type shrinkage (mash)
 - Per-drug `dreamlet::run_mash` fits (30 cell types each) are run via `treatment/differential_expression/dreamlet/02_run_mash.R`
 - Post-mash summaries are in `treatment/differential_expression/dreamlet/03_summarize_mash.Rmd`
 - FGSEA (Hallmark and GO:BP) on the mash posterior t-statistic is run in `treatment/differential_expression/dreamlet/04_dreamlet_mash_fgsea.R`. Output is `dreamlet_mash_gsea.tsv` (Supp Table S9) and the input to Fig 2C, Fig 2D, and Supp Figs S5/S6
-- The pre-mash companion runs the same fgsea on the raw dreamlet moderated t-statistics (no mash shrinkage) in `treatment/differential_expression/dreamlet/04b_dreamlet_pre_mash_fgsea.R` -> `dreamlet_pre_mash_gsea.tsv`. This feeds the pre-vs-post sensitivity analysis, Supp Fig S6 (GO:BP pre-mash), and the Hallmark pre-mash companion to Supp Fig S5
+- The pre-mash companion runs the same fgsea on the raw dreamlet moderated t-statistics (no mash shrinkage) in `treatment/differential_expression/dreamlet/04b_dreamlet_pre_mash_fgsea.R` -> `dreamlet_pre_mash_gsea.tsv`
 
 ### DE breadth tables
 - Per-(drug, gene) DE breadth tables (pre-mash (`adj.P.Val < 0.05`), post-mash (`lfsr < 0.05`), and cell-type-specific (breadth K=1)) are produced in `treatment/differential_expression/dreamlet/05_de_breadth_tables.R` (Supp Tables S6/S7/S8, written as both `.csv` and `.xlsx` with the gene column force-formatted as text to avoid Excel date-mangling)
@@ -67,7 +67,7 @@ ALK_paper_code/
 - Pseudobulk aggregation, covariate selection, and inverse-normal transformation are prepared in `treatment/matrixeqtl/01_prep_pseudobulk_covariates.Rmd`
 - Per-(cell type × treatment) cis-eQTL scans (100 kb window, MatrixEQTL, chromosome-parallelized) are run in `treatment/matrixeqtl/02_matrixeqtl_treatment.R`
 - The joint treatment+control expression matrix used by the interaction model is prepared in `treatment/matrixeqtl/03_prep_interaction_input.Rmd`
-- The interaction model (`modelLINEAR_CROSS`, genotype × treatment) is run in `treatment/matrixeqtl/04_matrixeqtl_interaction.R`
+- The interaction model (`modelLINEAR_CROSS`, genotype x treatment) is run in `treatment/matrixeqtl/04_matrixeqtl_interaction.R`
 - eigenMT + Benjamini–Hochberg multiple-testing correction is applied to the interaction scan, and post-eigenMT calls are consolidated in `treatment/matrixeqtl/06_post_eigenmt_interaction.Rmd`
 
 ### Reformatting for mash
