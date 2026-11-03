@@ -10,6 +10,8 @@ library(RColorBrewer)
 library(CelliD)
 options(future.globals.maxSize = 50e+09)
 
+source("/project/gilad/geena/ALK_paper_code/shared/figure_defs.R")
+
 filtered_dir <- "/project/gilad/geena/ALK_analysis/QC_preprocessing_treatment/"  # output of script 3b (filtered_*.rds and postQC_lognorm_*.rds)
 cellid_out_dir <- "/project/gilad/geena/publication_clean/results/treatment/celltype_annotation/" # CellID output directory
 
@@ -457,9 +459,9 @@ dir.create(fig_out_dir, showWarnings = FALSE, recursive = TRUE)
 # Bar plot: proportion by treatment
 p_treatment <- ggplot(cell_type_summary_treatment, aes(x = treatment, y = count, fill = cellid_type)) +
   geom_bar(stat = "identity", position = "fill", color = "white", linewidth = 0.08) +
-  scale_fill_manual(values = cellid_colors) +
-  labs(title = "Cell Type Composition by Treatment Condition",
-       x = "Treatment Condition", y = "Proportion of Cells", fill = "Cell Type") +
+  scale_fill_manual(values = cellid_colors, labels = relabel_celltypes) +
+  labs(title = "Cell Type Composition by Treatment",
+       x = "Treatment", y = "Proportion of Cells", fill = "Cell Type") +
   pub_theme
 
 
@@ -480,10 +482,10 @@ cell_type_summary_shared <- meta_data_combined %>%
 
 p_individual <- ggplot(cell_type_summary_shared, aes(x = treatment, y = count, fill = cellid_type)) +
   geom_bar(stat = "identity", position = "fill") +
-  scale_fill_manual(values = cellid_colors) +
+  scale_fill_manual(values = cellid_colors, labels = relabel_celltypes) +
   guides(fill = guide_legend(ncol = 1)) +
-  labs(title = "Cell Type Composition by Individual and Treatment Condition",
-       x = "Treatment Condition", y = "Proportion of Cells", fill = "Cell Type") +
+  labs(title = "Cell Type Composition by Individual and Treatment",
+       x = "Treatment", y = "Proportion of Cells", fill = "Cell Type") +
   pub_theme +
   facet_wrap(~ individual, scales = "free_y") +
   theme(

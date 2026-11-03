@@ -35,6 +35,8 @@ library(ggplot2)
 library(ComplexHeatmap)
 library(circlize)
 
+source("/project/gilad/geena/ALK_paper_code/shared/figure_defs.R")
+
 # Parameters
 fdr_threshold <- 0.05
 drug_order <- c("Ale", "Bri", "Cer", "Cri", "Lor")
@@ -162,6 +164,7 @@ draw_ct_heatmap <- function(mat, sig_mat, layers_vec, title, out_stem,
     row_split = row_layers, row_gap = unit(1.2, "mm"),
     row_title_gp = gpar(fontsize = 8, fontface = "bold"),
     column_labels = col_labels,
+    row_labels = relabel_celltypes(rownames(mat)),
     row_names_gp = gpar(fontsize = 6.5),
     column_names_gp = gpar(fontsize = 7),
     column_names_rot = 45,
@@ -258,7 +261,7 @@ ht_v <- Heatmap(
   row_gap = unit(3, "mm"),
   row_title_gp = gpar(fontsize = 10, fontface = "bold"),
   column_labels = readable_pathway_name(colnames(combined_mat_v)),
-  row_labels = row_ct,
+  row_labels = relabel_celltypes(row_ct),
   row_names_gp = gpar(fontsize = 6.5),
   column_names_gp = gpar(fontsize = 7),
   column_names_rot = 45,

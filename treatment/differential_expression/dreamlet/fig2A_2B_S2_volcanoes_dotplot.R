@@ -35,6 +35,8 @@ library(ggrepel)
 library(patchwork)
 library(scales)
 
+source("/project/gilad/geena/ALK_paper_code/shared/figure_defs.R")
+
 # Parameters
 fdr_threshold <- 0.05
 drug_order <- c("Ale", "Bri", "Cer", "Cri", "Lor")
@@ -187,6 +189,7 @@ make_dotplot_horizontal <- function(metric_tbl, top_marginal, right_marginal,
                          midpoint = 0, limits = c(-color_lim, color_lim),
                          na.value = "grey85",
                          name = expression(median~log[2]~FC)) +
+    scale_x_discrete(labels = relabel_celltypes) +
     labs(x = NULL, y = NULL) +
     theme_classic(base_size = 9) +
     theme(
@@ -363,7 +366,7 @@ make_strip <- function(ct) {
   panels <- lapply(drug_order, function(d) make_volcano(ct, d))
   germ <- cell_type_germ_layer[ct]
   color <- if (!is.na(germ)) germ_colors[[germ]] else "grey80"
-  make_row_label(ct, fill_color = color) +
+  make_row_label(relabel_celltypes(ct), fill_color = color) +
     wrap_plots(panels, nrow = 1) +
     plot_layout(widths = c(0.25, 5))
 }

@@ -16,6 +16,7 @@ library(RColorBrewer)
 library(patchwork)
 
 source("/project/gilad/geena/publication_clean/code/mash/mash_helpers.R")
+source("/project/gilad/geena/ALK_paper_code/shared/figure_defs.R")
 
 results_dir <- "/project/gilad/geena/publication_clean/results/mash/medianUMI1/"
 gene_loc_file <- "/project2/gilad/wenhe/EB/combined_3_4/data/ref_set/concise_GRCh38-2020_gtf_strand_considered.csv"
@@ -1310,7 +1311,8 @@ cat(sprintf("Spearman rho (median ALK logCPM ctrl  vs response eQTL count): %.3f
 
 # Scatter plot
 p_alk <- ggplot(alk_vs_response,
-                aes(x = median_logcpm_treat, y = n_response_eqtls, label = cell_type)) +
+                aes(x = median_logcpm_treat, y = n_response_eqtls,
+                    label = relabel_celltypes(cell_type))) +
   geom_point(size = 3, alpha = 0.8) +
   ggrepel::geom_text_repel(size = 3, max.overlaps = Inf) +
   theme_classic(base_size = 14) +

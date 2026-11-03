@@ -9,12 +9,14 @@ library(ggrepel)
 library(RColorBrewer)
 library(future)
 
-options(future.globals.maxSize = 50e+09)
-plan("multicore", workers = 8)
+options(future.globals.maxSize = 200e+09)
+# Sequential plan: avoids exporting the full BPCells-backed object to parallel
+# workers (which blew past the per-plan maxSizeOfObjects cap in the previous run).
+plan("sequential")
 
 cellid_rds <- "/project/gilad/geena/publication_clean/results/treatment/celltype_annotation/postQC_lognorm_batch1_2_3_4_all_germlayeradded.rds"
 sketch_dir <- "/project/gilad/geena/publication_clean/results/treatment/sketch_umap/"  # BPCells on-disk matrix and sketch RDS files
-umap_plot_dir <- "/project/gilad/geena/publication_clean/results/treatment/figures/umap_plots/" # UMAP plot output directory
+umap_plot_dir <- "/project/gilad/geena/ALK_paper_code_results/results/treatment/figures/umap_plots/" # UMAP plot output directory
 
 # Cell type color palettes (matching cell type proportion plot)
 ectoderm   <- c("Adrenocortical cells", "CNS glia", "CNS neurons", "Neuroendocrine cells", "PNS glia", "PNS neurons", "Photoreceptor cells", "Retinal pigment cells", "Horizontal cells", "Lens fibre cells", "Unipolar brush cells", "Chromaffin cells", "Retinal progenitors and Muller glia", "Ganglion cells", "Amacrine cells", "Bipolar cells", "ENS glia", "Purkinje neurons", "Schwann cells", "Inhibitory neurons", "Astrocytes", "Granule neurons", "Oligodendrocytes", "Sympathoblasts", "Visceral neurons", "Inhibitory interneurons", "Microglia", "Limbic system neurons", "ENS neurons", "Excitatory neurons", "Glioblast", "Neuroblast", "Neuron", "Neuronal IPC", "Oligo", "Radial glia", "Retinal neurons")
@@ -126,10 +128,20 @@ make_plots <- function(ondisk_allsamples, num_cells, max_dim, res) {
     ondisk_allsamples$germlayer,
     levels = c("Epithelium", "Ectoderm", "Mesoderm", "Endoderm", "iPSCs", "unassigned", "Unassigned")
   )
+  germ_legend_order <- c("Epithelium", "Ectoderm", "Mesoderm", "Endoderm", "iPSCs", "unassigned")
   fullumap_germ <- DimPlot(ondisk_allsamples, label = FALSE,
                            reduction = "full.umap", group.by = "germlayer") +
-    scale_color_manual(values = germ_colors, drop = TRUE)
+    scale_color_manual(values = germ_colors, breaks = germ_legend_order, drop = TRUE) +
+    labs(x = "UMAP 1", y = "UMAP 2") +
+    guides(color = guide_legend(override.aes = list(size = 5))) +
+    theme(axis.text   = element_blank(),
+          axis.ticks  = element_blank(),
+          axis.title  = element_text(size = 18),
+          legend.text = element_text(size = 16),
+          legend.title = element_blank(),
+          plot.title  = element_text(size = 20))
   ggsave(file.path(umap_plot_dir, paste0("full_umap_germ_",   tag, ".png")), fullumap_germ, width = 11, height = 11)
+  ggsave(file.path(umap_plot_dir, paste0("full_umap_germ_",   tag, ".pdf")), fullumap_germ, width = 11, height = 11)
 
 
   return(ondisk_allsamples)
@@ -156,7 +168,7 @@ batch1_2_3_4.sketch <- readRDS(file.path(sketch_dir, paste0("filtered_batch1_2_3
 # Cluster and plot at multiple dimension ranges
 # Compare to select the final visualization
 res <- 0.5
-dims <- c(30, 50)
+dims <- 30
 
 for (max_dim in dims) {
   message("Running dims 1:", max_dim, " res=", res)

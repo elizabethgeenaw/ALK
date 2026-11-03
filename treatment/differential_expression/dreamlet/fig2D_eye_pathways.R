@@ -28,6 +28,8 @@ library(ComplexHeatmap)
 library(circlize)
 library(grid)
 
+source("/project/gilad/geena/ALK_paper_code/shared/figure_defs.R")
+
 # Paths
 base_dir <- "/project/gilad/geena/publication_clean"
 mash_dir <- file.path(base_dir, "results/treatment/dreamlet_mash")
@@ -173,6 +175,7 @@ build_tile <- function(pathway_id, pretty_label, show_column_names,
     row_names_side = "left",
     row_names_gp = gpar(fontsize = 8),
     show_column_names = show_column_names,
+    column_labels = relabel_celltypes(colnames(mat)),
     column_names_gp = gpar(fontsize = 6.5),
     column_names_rot = 45,
     top_annotation = col_anno,
