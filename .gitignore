@@ -35,6 +35,7 @@ tests/
 
 webapp/
 treatment/differential_expression/cormotif/
+chem_perturbation/
 shared/
 treatment/matrixeqtl/supp_pcs_per_condition.R
 treatment/preprocessing/fig1C_render.R

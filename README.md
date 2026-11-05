@@ -11,8 +11,7 @@ ALK_paper_code/
 │   └── matrixeqtl/                 # cis-eQTL pipeline (treatment arm) + interaction concordance sensitivity
 ├── control/                        # Control HDC pipeline (feeds joint mash)
 ├── fastqtl2mash/                   # Reformat MatrixEQTL output for mash
-├── mash/                           # Joint mash fit, response-eQTL definition, cCRE enrichment, supplementary figures/tables
-└── chem_perturbation/              # CRISP zero-shot inference, response-eGene fgsea, methods schematic, validation/
+└── mash/                           # Joint mash fit, response-eQTL definition, cCRE enrichment, supplementary figures/tables
 ```
 
 
@@ -87,12 +86,3 @@ ALK_paper_code/
 
 ### Interaction-model concordance sensitivity check
 - `treatment/matrixeqtl/interaction_vs_mash_concordance.R`
-
-## Chemical perturbation prediction (CRISP)
-- Per-cell-type h5ad slices of the untreated HDC data used as CRISP input are exported in `chem_perturbation/01_export_control_cells.R`
-- CRISP model inputs (h5ad + drug SMILES embeddings) are prepared in `chem_perturbation/02_prep_input.py`
-- CRISP inference (GPU) is run in `chem_perturbation/03_run_crisp.py`
-- Per-gene z-scores (drug vs. mean of the other four drugs) are computed in `chem_perturbation/04_zscore.py`
-- FGSEA of CRISP-predicted drug-specific signals against the response eGene set (Supp Table S23) is run in `chem_perturbation/05_crisp_response_eqtl_fgsea.R`
-- Supp Fig S18 (CRISP methods schematic) is generated in `chem_perturbation/crisp_methods_schematic.py`
-- Shared pipeline config, SMILES validation, and RDKit 2D normalization helpers live in `chem_perturbation/config.py`, `chem_perturbation/validate_smile_df.py`, and `chem_perturbation/make_rdkit2d_normstats.py`
